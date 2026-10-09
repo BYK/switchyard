@@ -46,7 +46,7 @@ type capture struct {
 var deniedParts = map[string]bool{
 	".git": true, ".jj": true, ".aws": true, ".azure": true, ".kube": true,
 	".docker": true, ".gnupg": true, ".terraform": true, ".ssh": true,
-	".opencode": true, "node_modules": true, ".venv": true, ".cache": true,
+	".opencode": true, "node_modules": true, ".pnpm-store": true, ".venv": true, ".cache": true,
 	".lore.md": true, ".npmrc": true, ".pypirc": true, ".netrc": true,
 	".envrc": true, "credentials": true, "credentials.json": true,
 	"secrets.json": true, "service-account.json": true, "id_ed25519": true,

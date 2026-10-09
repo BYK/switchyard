@@ -16,13 +16,14 @@ func containerJobEnvironment(environment []string, target string) []string {
 	result := make([]string, 0, len(environment)+5)
 	for _, entry := range environment {
 		name, _, _ := strings.Cut(entry, "=")
-		if name != "HOME" && name != "PATH" && name != "PWD" && name != "TMPDIR" && name != "XDG_CACHE_HOME" && name != "XDG_CONFIG_HOME" && name != "XDG_DATA_HOME" && name != "XDG_RUNTIME_DIR" && name != "MESH_BACKEND" && name != "MESH_CONTAINER_RUNTIME" {
+		if name != "HOME" && name != "PATH" && name != "PWD" && name != "TMPDIR" && name != "XDG_CACHE_HOME" && name != "XDG_CONFIG_HOME" && name != "XDG_DATA_HOME" && name != "XDG_RUNTIME_DIR" && name != "MESH_BACKEND" && name != "MESH_CONTAINER_RUNTIME" && name != "npm_config_store_dir" && name != "NPM_CONFIG_STORE_DIR" && name != "PNPM_STORE_DIR" {
 			result = append(result, entry)
 		}
 	}
 	return append(result, "HOME=/home/mesh", "PATH=/usr/local/bin:/usr/bin:/bin", "TMPDIR=/tmp",
 		"XDG_CACHE_HOME=/home/mesh/.cache", "XDG_CONFIG_HOME=/home/mesh/.config",
-		"XDG_DATA_HOME=/home/mesh/.local/share", "PWD="+target, "MESH_BACKEND=local")
+		"XDG_DATA_HOME=/home/mesh/.local/share", "npm_config_store_dir=/home/mesh/.local/share/pnpm/store",
+		"PWD="+target, "MESH_BACKEND=local")
 }
 
 // Container engines must use the worker account's runtime state, not the
@@ -32,7 +33,7 @@ func containerEngineEnvironment(environment []string) ([]string, error) {
 	result := make([]string, 0, len(environment)+len(os.Environ()))
 	for _, entry := range os.Environ() {
 		name, _, _ := strings.Cut(entry, "=")
-		if !containerEngineControl(name) {
+		if !containerEngineControl(name) && name != "npm_config_store_dir" {
 			result = append(result, entry)
 		}
 	}
@@ -44,7 +45,7 @@ func containerEngineEnvironment(environment []string) ([]string, error) {
 		if containerEngineControl(name) {
 			return nil, errors.New("invocation environment cannot override container engine configuration")
 		}
-		if name != "HOME" && name != "PATH" && name != "PWD" && name != "TMPDIR" && name != "XDG_CACHE_HOME" && name != "XDG_CONFIG_HOME" && name != "XDG_DATA_HOME" && name != "XDG_RUNTIME_DIR" && name != "MESH_BACKEND" && name != "USER" && name != "LOGNAME" {
+		if name != "HOME" && name != "PATH" && name != "PWD" && name != "TMPDIR" && name != "XDG_CACHE_HOME" && name != "XDG_CONFIG_HOME" && name != "XDG_DATA_HOME" && name != "XDG_RUNTIME_DIR" && name != "MESH_BACKEND" && name != "USER" && name != "LOGNAME" && name != "npm_config_store_dir" {
 			result = append(result, entry)
 		}
 	}
@@ -186,7 +187,7 @@ exec "$@"`
 			identityEnv = append(identityEnv, entry)
 			continue
 		}
-		if name == "HOME" || name == "PATH" || name == "PWD" || name == "TMPDIR" || name == "XDG_CACHE_HOME" || name == "XDG_CONFIG_HOME" || name == "XDG_DATA_HOME" || name == "MESH_BACKEND" {
+		if name == "HOME" || name == "PATH" || name == "PWD" || name == "TMPDIR" || name == "XDG_CACHE_HOME" || name == "XDG_CONFIG_HOME" || name == "XDG_DATA_HOME" || name == "MESH_BACKEND" || name == "npm_config_store_dir" {
 			args = append(args, "--env", entry)
 		} else {
 			args = append(args, "--env", name)

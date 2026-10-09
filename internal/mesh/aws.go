@@ -23,7 +23,7 @@ const (
 	awsRegion  = "eu-west-2"
 	awsName    = "byk-compute-mesh-worker"
 	awsRoot    = "/home/ubuntu/.local/share/compute-mesh-go/worker"
-	awsCommand = "/home/ubuntu/.local/bin/mesh-go"
+	awsCommand = "/home/ubuntu/.local/bin/switchyard"
 )
 
 //go:embed aws-bootstrap.sh
@@ -620,7 +620,7 @@ func awsUp(home, dir string) error {
 	}
 	switch info.State.Name {
 	case "pending":
-		fmt.Println("AWS worker launching; check mesh-go aws status after it is running")
+		fmt.Println("AWS worker launching; check switchyard aws status after it is running")
 	case "stopped":
 		if err := awsRefreshIngress(dir, &state); err != nil {
 			return err
@@ -628,7 +628,7 @@ func awsUp(home, dir string) error {
 		if _, err := awsCall("ec2", "start-instances", "--instance-ids", state.InstanceID); err != nil {
 			return err
 		}
-		fmt.Println("AWS worker starting; check mesh-go aws status before setup or run")
+		fmt.Println("AWS worker starting; check switchyard aws status before setup or run")
 	case "running":
 		if err := awsRefreshIngress(dir, &state); err != nil {
 			return err
@@ -670,7 +670,7 @@ func awsStatus(home, dir string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("AWS London worker: %s; disk persists until mesh-go aws destroy\n", info.State.Name)
+	fmt.Printf("AWS London worker: %s; disk persists until switchyard aws destroy\n", info.State.Name)
 	if info.State.Name != "running" {
 		return nil
 	}
@@ -770,13 +770,13 @@ func awsSetup(home, dir, source string) error {
 	if err != nil || !strings.HasPrefix(string(module), "module github.com/BYK/switchyard\n") {
 		return errors.New("--source must point to the Switchyard Go source tree")
 	}
-	build, err := os.MkdirTemp("", "mesh-go-aws-*")
+	build, err := os.MkdirTemp("", "switchyard-aws-*")
 	if err != nil {
 		return errors.New("could not prepare the worker binary build")
 	}
 	defer os.RemoveAll(build)
-	binary := filepath.Join(build, "mesh-go")
-	cmd := exec.Command("go", "build", "-trimpath", "-o", binary, "./cmd/mesh-go")
+	binary := filepath.Join(build, "switchyard")
+	cmd := exec.Command("go", "build", "-trimpath", "-o", binary, "./cmd/switchyard")
 	cmd.Dir, cmd.Env = source, append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH=amd64")
 	started := time.Now()
 	if err := cmd.Run(); err != nil {
@@ -785,7 +785,7 @@ func awsSetup(home, dir, source string) error {
 	}
 	debugEvent("worker-build", "ok", started)
 	params := append([]string{"-B"}, awsSSHOptions(dir)...)
-	params = append(params, binary, "ubuntu@"+ip+":/home/ubuntu/mesh-go.next")
+	params = append(params, binary, "ubuntu@"+ip+":/home/ubuntu/switchyard.next")
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	if err := exec.CommandContext(ctx, "scp", params...).Run(); err != nil {
@@ -793,8 +793,8 @@ func awsSetup(home, dir, source string) error {
 	}
 	for _, args := range [][]string{
 		{"mkdir", "-p", "/home/ubuntu/.local/bin"},
-		{"chmod", "755", "/home/ubuntu/mesh-go.next"},
-		{"mv", "-f", "/home/ubuntu/mesh-go.next", awsCommand},
+		{"chmod", "755", "/home/ubuntu/switchyard.next"},
+		{"mv", "-f", "/home/ubuntu/switchyard.next", awsCommand},
 		{awsCommand, "worker", "--root", awsRoot, "init"},
 	} {
 		if !awsSSH(dir, ip, args...) {
@@ -813,6 +813,9 @@ func awsSetup(home, dir, source string) error {
 	debugEvent("remote-image-build", "ok", imageBuildStart)
 	if err := awsConfigure(home, dir, info); err != nil {
 		return err
+	}
+	if !awsSSH(dir, ip, "rm", "-f", "/home/ubuntu/.local/bin/mesh-go") {
+		return errors.New("could not remove the old worker binary")
 	}
 	fmt.Println("Go worker installed; pinned SSH backend updated")
 	return nil
@@ -837,7 +840,7 @@ func awsDown(dir string) error {
 	if _, err := awsCall("ec2", "stop-instances", "--instance-ids", state.InstanceID); err != nil {
 		return err
 	}
-	fmt.Println("AWS worker stop requested; verify with mesh-go aws status")
+	fmt.Println("AWS worker stop requested; verify with switchyard aws status")
 	return nil
 }
 
@@ -864,7 +867,7 @@ func awsDestroy(dir string) error {
 			if _, err := awsCall("ec2", "terminate-instances", "--instance-ids", state.InstanceID); err != nil {
 				return err
 			}
-			fmt.Println("AWS worker termination requested; check mesh-go aws destroy again after termination")
+			fmt.Println("AWS worker termination requested; check switchyard aws destroy again after termination")
 			return nil
 		}
 		if info.State.Name != "terminated" {
@@ -885,7 +888,7 @@ func awsDestroy(dir string) error {
 		return err
 	}
 	if len(disks) != 0 {
-		fmt.Println("Waiting for worker EBS volume deletion; check mesh-go aws destroy after it completes")
+		fmt.Println("Waiting for worker EBS volume deletion; check switchyard aws destroy after it completes")
 		return nil
 	}
 	if state.GroupID != "" {

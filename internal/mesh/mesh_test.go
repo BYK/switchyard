@@ -50,8 +50,8 @@ func binary(t *testing.T) string {
 	t.Helper()
 	_, filename, _, _ := runtime.Caller(0)
 	module := filepath.Clean(filepath.Join(filepath.Dir(filename), "..", ".."))
-	path := filepath.Join(t.TempDir(), "mesh-go")
-	cmd := exec.Command("go", "build", "-o", path, "./cmd/mesh-go")
+	path := filepath.Join(t.TempDir(), "switchyard")
+	cmd := exec.Command("go", "build", "-o", path, "./cmd/switchyard")
 	cmd.Dir = module
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build CLI: %s (%v)", output, err)
@@ -196,6 +196,40 @@ func TestDeletedTrackedFileAndExplicitJJInclude(t *testing.T) {
 	defer os.RemoveAll(filepath.Dir(snapshot.Tree))
 	if _, err := verifyTree(snapshot.Tree); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPatchIgnoresLargeWorkerPnpmStore(t *testing.T) {
+	root := t.TempDir()
+	original := filepath.Join(root, "original")
+	checkout := filepath.Join(root, "checkout")
+	for _, dir := range []string{original, checkout, filepath.Join(checkout, ".pnpm-store", "v10", "files")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, dir := range []string{original, checkout} {
+		if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("baseline\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(checkout, "agent-note.txt"), []byte("worker edit\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cache := filepath.Join(checkout, ".pnpm-store", "v10", "files", "cache")
+	if err := os.WriteFile(cache, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(cache, maxFileSize+1); err != nil {
+		t.Fatal(err)
+	}
+	patch := filepath.Join(root, "changes.patch")
+	if reason := collectPatch(original, checkout, patch); reason != "" {
+		t.Fatalf("cache blocked patch collection: %s", reason)
+	}
+	data, err := os.ReadFile(patch)
+	if err != nil || !strings.Contains(string(data), "+worker edit") || strings.Contains(string(data), ".pnpm-store") {
+		t.Fatalf("unexpected patch for worker edit and cache: %v", err)
 	}
 }
 

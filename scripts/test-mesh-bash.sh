@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -ne 2 || $1 != /* || $2 != /* || ! -x $1 || ! -x $2 ]]; then
-  printf 'Usage: %s /absolute/path/to/patched/bash /absolute/path/to/mesh-go\n' "$0" >&2
+  printf 'Usage: %s /absolute/path/to/patched/bash /absolute/path/to/switchyard\n' "$0" >&2
   exit 2
 fi
 

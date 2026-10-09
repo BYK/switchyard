@@ -71,14 +71,14 @@ func saveImage(root, id string) error {
 func loadImage(root string) (workerImage, error) {
 	content, err := privateRead(imageFile(root), 4096)
 	if err != nil {
-		return workerImage{}, errors.New("worker has no pinned Node image; run mesh-go image build")
+		return workerImage{}, errors.New("worker has no pinned Node image; run switchyard image build")
 	}
 	var config workerImage
 	if json.Unmarshal(content, &config) != nil || !validImageID(config.ID) || config.Runtime != "podman" && config.Runtime != "docker" {
-		return workerImage{}, errors.New("worker image configuration is invalid; rebuild it with mesh-go image build")
+		return workerImage{}, errors.New("worker image configuration is invalid; rebuild it with switchyard image build")
 	}
 	if requested := os.Getenv("MESH_CONTAINER_RUNTIME"); requested != "" && config.Runtime != requested {
-		return workerImage{}, errors.New("worker image belongs to another container runtime; rebuild it with mesh-go image build")
+		return workerImage{}, errors.New("worker image belongs to another container runtime; rebuild it with switchyard image build")
 	}
 	if err := inspectRuntimeImage(config.Runtime, config.ID); err != nil {
 		return workerImage{}, err

@@ -161,6 +161,45 @@ func TestTraceShellRoutesOneExecAndPreservesLocalCommands(t *testing.T) {
 	}
 }
 
+func TestTraceInstallMigratesOnlyThePrivateUnpublishedBinary(t *testing.T) {
+	home := t.TempDir()
+	bin := filepath.Join(home, "bin")
+	directory := filepath.Join(home, "ptrace", "bin")
+	if err := os.MkdirAll(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	previous := filepath.Join(bin, "mesh-go")
+	current := filepath.Join(bin, "switchyard")
+	if err := os.WriteFile(previous, []byte("previous binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(directory, "bash")
+	if err := os.Symlink(previous, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := installTraceShell(home, current); err != nil {
+		t.Fatalf("could not migrate the private traced-shell link: %v", err)
+	}
+	if target, err := os.Readlink(link); err != nil || target != current {
+		t.Fatalf("traced-shell link points to %q: %v", target, err)
+	}
+	if _, err := installTraceShell(home, current); err != nil {
+		t.Fatalf("repeat install failed: %v", err)
+	}
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/usr/bin/true", link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := installTraceShell(home, current); err == nil {
+		t.Fatal("replaced an unrelated traced-shell link")
+	}
+}
+
 func TestTraceShellNameSelectsTracerAndInteractivePassesThrough(t *testing.T) {
 	exe := binary(t)
 	home := t.TempDir()

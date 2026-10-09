@@ -376,7 +376,7 @@ func executeJob(home, self, start, backend string, includes, required []string, 
 		defer cancel()
 		_, _, cancelErr := provider.Call(cancelCtx, []string{"cancel", "--project", project, "--job", job}, false)
 		if cancelErr != nil {
-			fmt.Fprintln(os.Stderr, "mesh-go: worker cancellation could not be confirmed; use mesh-go cancel "+job)
+			fmt.Fprintln(os.Stderr, "switchyard: worker cancellation could not be confirmed; use switchyard cancel "+job)
 		}
 		return int(interrupted.Load())
 	}
@@ -410,7 +410,7 @@ func executeJob(home, self, start, backend string, includes, required []string, 
 		}
 	}
 	if status.EditsError != "" {
-		fmt.Fprintln(os.Stderr, "mesh-go: "+status.EditsError)
+		fmt.Fprintln(os.Stderr, "switchyard: "+status.EditsError)
 	}
 	if provider.cfg.Kind != "local" {
 		executable, lookupErr := exec.LookPath(argv[0])
@@ -424,7 +424,7 @@ func executeJob(home, self, start, backend string, includes, required []string, 
 				if signature, ok := commandSignature(start, absolute, argv[1:]); ok {
 					// A failed observation must never replace a completed job's exit status.
 					if err := recordCommandObservation(home, signature, observedBackendID(provider), time.Since(started), 0); err != nil {
-						fmt.Fprintln(os.Stderr, "mesh-go: private command timing could not be saved")
+						fmt.Fprintln(os.Stderr, "switchyard: private command timing could not be saved")
 					}
 				}
 			}
@@ -466,11 +466,18 @@ func existingJob(home, self, action, job string) int {
 		exit = strconv.Itoa(*state.ExitStatus)
 	}
 	fmt.Printf("Job %s: %s; snapshot %s; exit %s\n", job, state.State, state.Snapshot, exit)
+	if state.EditsError != "" {
+		fmt.Println("Worker edits: collection failed")
+	} else if state.HasEdits {
+		fmt.Println("Worker edits: available")
+	} else if state.State == "finished" {
+		fmt.Println("Worker edits: none")
+	}
 	return 0
 }
 
 func fail(err error) int {
-	fmt.Fprintln(os.Stderr, "mesh-go: "+err.Error())
+	fmt.Fprintln(os.Stderr, "switchyard: "+err.Error())
 	return 2
 }
 
@@ -508,32 +515,32 @@ func addBackend(home string, args []string) int {
 }
 
 func printHelp() {
-	fmt.Println("mesh-go: frozen worktree execution on local and operator-controlled workers")
-	fmt.Println("  mesh-go backend add --name NAME --kind local|ssh|plugin --root PATH [options]")
-	fmt.Println("  mesh-go backend list")
-	fmt.Println("  mesh-go preview [--repo PATH] [--include PATH]")
-	fmt.Println("  mesh-go run [--backend auto|NAME] [--repo PATH] [--include PATH] [--require CAPABILITY] -- COMMAND ARGS...")
-	fmt.Println("  mesh-go proxy [--backend auto|NAME] [--repo PATH] -- COMMAND ARGS...")
-	fmt.Println("  mesh-go jobs                    list local run IDs and unapplied patches")
-	fmt.Println("  mesh-go status|logs|cancel JOB_ID")
-	fmt.Println("  mesh-go hook [--] TOOL ARGS...   (managed PATH shims)")
-	fmt.Println("  mesh-go hook --shell --resolved PATH -- TOOL ARGS...   (patched Bash external command hook)")
-	fmt.Println("  mesh-go trace install           (private Linux x86-64 Bash launch link)")
-	fmt.Println("  mesh-go trace shell -- -c COMMAND   (opt-in exec-filtered Bash supervisor)")
-	fmt.Println("  mesh-go image build|status       (pinned Node image in the selected Linux runtime)")
-	fmt.Println("  mesh-go aws up|status|setup|down|destroy [--source PATH]")
-	fmt.Println("  mesh-go container status|stop [--cwd PATH]   (opt-in CWD sandbox)")
-	fmt.Println("  mesh-go worker --root PATH init|ready|prepare|execute|status|logs|patch|cancel")
+	fmt.Println("switchyard: frozen worktree execution on local and operator-controlled workers")
+	fmt.Println("  switchyard backend add --name NAME --kind local|ssh|plugin --root PATH [options]")
+	fmt.Println("  switchyard backend list")
+	fmt.Println("  switchyard preview [--repo PATH] [--include PATH]")
+	fmt.Println("  switchyard run [--backend auto|NAME] [--repo PATH] [--include PATH] [--require CAPABILITY] -- COMMAND ARGS...")
+	fmt.Println("  switchyard proxy [--backend auto|NAME] [--repo PATH] -- COMMAND ARGS...")
+	fmt.Println("  switchyard jobs                    list local run IDs and unapplied patches")
+	fmt.Println("  switchyard status|logs|cancel JOB_ID")
+	fmt.Println("  switchyard hook [--] TOOL ARGS...   (managed PATH shims)")
+	fmt.Println("  switchyard hook --shell --resolved PATH -- TOOL ARGS...   (patched Bash external command hook)")
+	fmt.Println("  switchyard trace install           (private Linux x86-64 Bash launch link)")
+	fmt.Println("  switchyard trace shell -- -c COMMAND   (opt-in exec-filtered Bash supervisor)")
+	fmt.Println("  switchyard image build|status       (pinned Node image in the selected Linux runtime)")
+	fmt.Println("  switchyard aws up|status|setup|down|destroy [--source PATH]")
+	fmt.Println("  switchyard container status|stop [--cwd PATH]   (opt-in CWD sandbox)")
+	fmt.Println("  switchyard worker --root PATH init|ready|prepare|execute|status|logs|patch|cancel")
 }
 
 func Main(args []string) int {
 	self, err := os.Executable()
 	if err != nil {
-		return fail(errors.New("could not locate mesh-go binary"))
+		return fail(errors.New("could not locate switchyard binary"))
 	}
 	self, err = filepath.EvalSymlinks(self)
 	if err != nil {
-		return fail(errors.New("could not resolve mesh-go binary"))
+		return fail(errors.New("could not resolve switchyard binary"))
 	}
 	home, err := dataHome()
 	if err != nil {
@@ -683,7 +690,7 @@ func Main(args []string) int {
 		}
 		return containerControl(home, args[1], *cwd)
 	default:
-		return fail(errors.New("unknown command; run mesh-go help"))
+		return fail(errors.New("unknown command; run switchyard help"))
 	}
 }
 

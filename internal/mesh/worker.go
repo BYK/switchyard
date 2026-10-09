@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -546,7 +547,7 @@ func workerExecute(root, project, job, snapshot, cwd string, argv, environment [
 		cmd, setup, planErr = nodeCommand(checkout, target, filepath.Join(path, "setup-ready"), argv, environment)
 	}
 	if planErr != nil {
-		fmt.Fprintln(logWriter{log: output, stream: os.Stderr}, "mesh-go: "+planErr.Error())
+		fmt.Fprintln(logWriter{log: output, stream: os.Stderr}, "switchyard: "+planErr.Error())
 		record.State, record.SetupStatus, record.Finished = "setup-failed", new(int), time.Now().UTC().Format(time.RFC3339Nano)
 		*record.SetupStatus = 2
 		if err := log.Close(); err != nil {
@@ -637,7 +638,7 @@ func workerExecute(root, project, job, snapshot, cwd string, argv, environment [
 	}
 	// A failed mirror update never changes the result of a completed command.
 	if err := publishMirror(root, project, snapshot, incoming); err != nil {
-		fmt.Fprintln(os.Stderr, "mesh-go: worker cache could not be updated")
+		fmt.Fprintln(os.Stderr, "switchyard: worker cache could not be updated")
 	}
 	if setup {
 		marker := filepath.Join(path, "setup-ready")
@@ -735,14 +736,17 @@ func collectPatch(original, checkout, dest string) string {
 		if walkErr != nil {
 			return walkErr
 		}
-		if item.IsDir() {
-			return nil
-		}
 		rel, err := filepath.Rel(checkout, path)
 		if err != nil {
 			return err
 		}
 		if excludedPath(filepath.ToSlash(rel)) {
+			if item.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if item.IsDir() {
 			return nil
 		}
 		info, err := item.Info()
@@ -775,6 +779,19 @@ func collectPatch(original, checkout, dest string) string {
 	tree := strings.TrimSpace(string(baseline))
 	if _, err := gitWithIndex(index, gitDir, checkout, "read-tree", tree); err != nil {
 		return "could not compare worker edits"
+	}
+	// Git must ignore generated caches and private paths before staging: removing
+	// them from the index afterward would still write their bytes to Git objects.
+	patterns := make([]string, 0, len(deniedParts)+len(deniedGlobs))
+	for part := range deniedParts {
+		patterns = append(patterns, "**/"+part)
+	}
+	for _, glob := range deniedGlobs {
+		patterns = append(patterns, "**/"+glob)
+	}
+	sort.Strings(patterns)
+	if err := writeAtomic(filepath.Join(gitDir, "info", "exclude"), []byte(strings.Join(patterns, "\n")+"\n")); err != nil {
+		return "could not exclude private worker files"
 	}
 	if _, err := gitWithIndex(index, gitDir, checkout, "add", "-A", "--", "."); err != nil {
 		return "could not stage worker edits"

@@ -70,8 +70,25 @@ func installTraceShell(home string, self string) (string, error) {
 			return "", errors.New("traced shell path already contains an unrelated file")
 		}
 		target, err := os.Readlink(shell)
-		if err != nil || target != self {
+		if err != nil {
 			return "", errors.New("traced shell path already points elsewhere")
+		}
+		if target == self {
+			return shell, nil
+		}
+		// Migrate only the private, unpublished CLI installed beside this binary.
+		old := filepath.Join(filepath.Dir(self), "mesh-go")
+		oldInfo, oldErr := os.Lstat(old)
+		if target != old || oldErr != nil || !oldInfo.Mode().IsRegular() || oldInfo.Mode().Perm()&0o111 == 0 {
+			return "", errors.New("traced shell path already points elsewhere")
+		}
+		replacement := filepath.Join(directory, "bash.switchyard-next")
+		if err := os.Symlink(self, replacement); err != nil {
+			return "", errors.New("could not prepare traced shell migration")
+		}
+		defer os.Remove(replacement)
+		if err := os.Rename(replacement, shell); err != nil {
+			return "", errors.New("could not migrate traced shell link")
 		}
 		return shell, nil
 	} else if !os.IsNotExist(err) {

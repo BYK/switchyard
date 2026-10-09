@@ -8,6 +8,21 @@ import (
 	"testing"
 )
 
+func TestContainerPnpmStoreStaysOutsideTheCheckout(t *testing.T) {
+	environment := containerJobEnvironment([]string{
+		"npm_config_store_dir=/workspace/.pnpm-store", "NPM_CONFIG_STORE_DIR=/workspace/other-store",
+		"PNPM_STORE_DIR=/workspace/third-store", "USER=worker",
+	}, "/workspace")
+	if strings.Count(strings.Join(environment, "\n"), "npm_config_store_dir=") != 1 ||
+		!strings.Contains(strings.Join(environment, "\n"), "npm_config_store_dir=/home/mesh/.local/share/pnpm/store") ||
+		strings.Contains(strings.Join(environment, "\n"), "/workspace/.pnpm-store") ||
+		strings.Contains(strings.Join(environment, "\n"), "/workspace/other-store") ||
+		strings.Contains(strings.Join(environment, "\n"), "/workspace/third-store") ||
+		!strings.Contains(strings.Join(environment, "\n"), "USER=worker") {
+		t.Fatal("pnpm store is inside the job checkout or invocation environment was lost")
+	}
+}
+
 func TestPinnedNodeImageRunsIsolatedSnapshotAndReturnsEdits(t *testing.T) {
 	image := os.Getenv("MESH_TEST_NODE_IMAGE")
 	if image == "" {
@@ -78,18 +93,19 @@ func TestRootlessWorkerArgumentsDoNotExposeInvocationValues(t *testing.T) {
 	}
 	secret := "private-value-with-newline\nnext-line"
 	cmd, setup, err := containerJobCommand(root, jobPath, checkout, ".", []string{"node", "-v"},
-		[]string{"HOME=/from-invoker", "XDG_DATA_HOME=/from-invoker/data", "USER=mesh-invoker", "LOGNAME=mesh-invoker", "MESH_TEST_SECRET=" + secret},
+		[]string{"HOME=/from-invoker", "XDG_DATA_HOME=/from-invoker/data", "USER=mesh-invoker", "LOGNAME=mesh-invoker", "MESH_TEST_SECRET=" + secret, "npm_config_store_dir=/workspace/.pnpm-store"},
 		workerImage{ID: "sha256:" + strings.Repeat("c", 64), Runtime: "podman"})
 	if err != nil || setup {
 		t.Fatalf("rootless job could not be prepared: %v", err)
 	}
 	arguments := strings.Join(cmd.Args, " ")
 	if strings.Contains(arguments, secret) || strings.Contains(arguments, "mesh-invoker") || !strings.Contains(arguments, "--env-file /proc/self/fd/3") || !strings.Contains(arguments, "--userns=keep-id") ||
-		!strings.Contains(arguments, "--network=pasta") || strings.Contains(arguments, "/from-invoker") {
+		!strings.Contains(arguments, "--network=pasta") || strings.Contains(arguments, "/from-invoker") ||
+		!strings.Contains(arguments, "--env npm_config_store_dir=/home/mesh/.local/share/pnpm/store") || strings.Contains(arguments, "/workspace/.pnpm-store") {
 		t.Fatal("rootless job changed namespace or exposed invocation values")
 	}
 	if !strings.Contains(strings.Join(cmd.Env, "\n"), "MESH_TEST_SECRET="+secret) || strings.Contains(strings.Join(cmd.Env, "\n"), "mesh-invoker") ||
-		strings.Contains(strings.Join(cmd.Env, "\n"), "/from-invoker") {
+		strings.Contains(strings.Join(cmd.Env, "\n"), "/from-invoker") || strings.Contains(strings.Join(cmd.Env, "\n"), "/workspace/.pnpm-store") {
 		t.Fatal("container engine received an incorrect invocation environment")
 	}
 	if len(cmd.ExtraFiles) != 1 {
@@ -122,7 +138,7 @@ func TestPinnedNodeImageInstallsLockedDependencies(t *testing.T) {
 	}
 	root, home, exe := fixture(t), t.TempDir(), binary(t)
 	for name, content := range map[string]string{
-		"package.json":   `{"name":"mesh-pinned-image-test","version":"1.0.0","packageManager":"pnpm@10.28.0","private":true,"scripts":{"test":"node -e \"require('fs').writeFileSync('agent-note.txt', 'pnpm complete')\""}}`,
+		"package.json":   `{"name":"mesh-pinned-image-test","version":"1.0.0","packageManager":"pnpm@10.28.0","private":true,"scripts":{"test":"node -e \"require('fs').writeFileSync('agent-note.txt', require('child_process').execFileSync('pnpm', ['store', 'path'], {encoding:'utf8'}).trim())\""}}`,
 		"pnpm-lock.yaml": "lockfileVersion: '9.0'\nimporters:\n  .: {}\n",
 	} {
 		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o600); err != nil {
@@ -139,6 +155,7 @@ func TestPinnedNodeImageInstallsLockedDependencies(t *testing.T) {
 	if err := saveImage(filepath.Join(home, "worker"), image); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("npm_config_store_dir", "/workspace/.pnpm-store")
 	status, output := command(t, exe, home, "run", "--backend", "local", "--repo", root, "--", "pnpm", "test")
 	if status != 0 || !strings.Contains(output, "mesh-pinned-image-test") {
 		t.Fatalf("locked pnpm job failed: exit=%d output=%s", status, output)
@@ -148,7 +165,7 @@ func TestPinnedNodeImageInstallsLockedDependencies(t *testing.T) {
 	}
 	job := jobID(t, output)
 	patch, err := os.ReadFile(filepath.Join(home, "runs", job+".patch"))
-	if err != nil || !strings.Contains(string(patch), "+pnpm complete") || strings.Contains(string(patch), "node_modules") {
+	if err != nil || !strings.Contains(string(patch), "+/home/mesh/.local/share/pnpm/store") || strings.Contains(string(patch), "node_modules") || strings.Contains(string(patch), ".pnpm-store") {
 		t.Fatalf("pnpm edits did not remain isolated: %v", err)
 	}
 }

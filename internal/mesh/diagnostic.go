@@ -12,6 +12,6 @@ func debugEvent(phase, result string, started time.Time) {
 	if os.Getenv("MESH_DEBUG") != "1" {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "mesh-go: debug phase=%s result=%s elapsed_ms=%d\n",
+	fmt.Fprintf(os.Stderr, "switchyard: debug phase=%s result=%s elapsed_ms=%d\n",
 		phase, result, time.Since(started).Milliseconds())
 }
