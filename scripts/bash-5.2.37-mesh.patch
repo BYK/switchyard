@@ -1,0 +1,63 @@
+--- a/execute_cmd.c
++++ b/execute_cmd.c
+@@ -25,6 +25,8 @@
+ #endif /* _AIX && RISC6000 && !__GNUC__ */
+ 
+ #include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
+ #include "chartypes.h"
+ #include "bashtypes.h"
+ #if !defined (_MINIX) && defined (HAVE_SYS_FILE_H)
+@@ -5749,6 +5751,51 @@
+ 	 leave it there, in the same format that the user used to
+ 	 type it in. */
+       args = strvec_from_word_list (words, 0, 0, (int *)NULL);
++      /* Mesh proof of concept: Bash has already expanded words, resolved
++         builtins/functions, forked, and installed the command's file
++         descriptors. Delegate named tools to Mesh at the external exec
++         boundary; Mesh alone decides whether each invocation can move.
++         Leave special PATH lookup, redirections,
++         background commands, and pipelines with Bash until their behavior
++         is explicitly preserved by the worker protocol. */
++      {
++	const char *mesh_proxy, *mesh_backend;
++	char **mesh_args;
++	int n, i;
++
++	mesh_proxy = getenv ("MESH_BASH_PROXY");
++	mesh_backend = getenv ("MESH_BACKEND");
++	if (mesh_proxy && mesh_proxy[0] == '/' &&
++	    (mesh_backend == 0 || strcmp (mesh_backend, "local") != 0) &&
++	    getuid () == geteuid () && getgid () == getegid () &&
++	    redirects == 0 && async == 0 &&
++	    (subshell_environment & (SUBSHELL_ASYNC | SUBSHELL_PAREN |
++		SUBSHELL_COMSUB | SUBSHELL_PIPE | SUBSHELL_PROCSUB |
++		SUBSHELL_COPROC)) == 0 &&
++	    (cmdflags & CMD_STDPATH) == 0 && command[0] == '/' &&
++	    args[0] && strchr (args[0], '/') == 0 &&
++	    (strcmp (args[0], "pnpm") == 0 ||
++	     strcmp (args[0], "npm") == 0 ||
++	     strcmp (args[0], "go") == 0 ||
++	     strcmp (args[0], "cargo") == 0 ||
++	     strcmp (args[0], "pytest") == 0 ||
++	     strcmp (args[0], "uv") == 0 ||
++	     strcmp (args[0], "make") == 0))
++	  {
++	    n = strvec_len (args);
++	    mesh_args = (char **)xmalloc ((n + 7) * sizeof (char *));
++	    mesh_args[0] = (char *)mesh_proxy;
++	    mesh_args[1] = "hook";
++	    mesh_args[2] = "--shell";
++	    mesh_args[3] = "--resolved";
++	    mesh_args[4] = command;
++	    mesh_args[5] = "--";
++	    for (i = 0; i < n; i++)
++	      mesh_args[i + 6] = args[i];
++	    mesh_args[n + 6] = 0;
++	    exit (shell_execve ((char *)mesh_proxy, mesh_args, export_env));
++	  }
++      }
+       exit (shell_execve (command, args, export_env));
+     }
+   else

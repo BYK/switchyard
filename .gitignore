@@ -1,0 +1,4 @@
+/mesh-go
+*.test
+coverage.out
+.env*

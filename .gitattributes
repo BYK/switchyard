@@ -1,0 +1,2 @@
+# Patch context preserves the upstream Bash file's original whitespace.
+scripts/*.patch whitespace=-blank-at-eol,-space-before-tab
