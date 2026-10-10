@@ -13,22 +13,22 @@
  	 leave it there, in the same format that the user used to
  	 type it in. */
        args = strvec_from_word_list (words, 0, 0, (int *)NULL);
-+      /* Mesh proof of concept: Bash has already expanded words, resolved
++      /* Switchyard proof of concept: Bash has already expanded words, resolved
 +         builtins/functions, forked, and installed the command's file
-+         descriptors. Delegate named tools to Mesh at the external exec
-+         boundary; Mesh alone decides whether each invocation can move.
++         descriptors. Delegate named tools to Switchyard at the external exec
++         boundary; Switchyard alone decides whether each invocation can move.
 +         Leave special PATH lookup, redirections,
 +         background commands, and pipelines with Bash until their behavior
 +         is explicitly preserved by the worker protocol. */
 +      {
-+	const char *mesh_proxy, *mesh_backend;
-+	char **mesh_args;
++	const char *switchyard_proxy, *switchyard_backend;
++	char **switchyard_args;
 +	int n, i;
 +
-+	mesh_proxy = getenv ("MESH_BASH_PROXY");
-+	mesh_backend = getenv ("MESH_BACKEND");
-+	if (mesh_proxy && mesh_proxy[0] == '/' &&
-+	    (mesh_backend == 0 || strcmp (mesh_backend, "local") != 0) &&
++	switchyard_proxy = getenv ("SWITCHYARD_BASH_PROXY");
++	switchyard_backend = getenv ("SWITCHYARD_BACKEND");
++	if (switchyard_proxy && switchyard_proxy[0] == '/' &&
++	    (switchyard_backend == 0 || strcmp (switchyard_backend, "local") != 0) &&
 +	    getuid () == geteuid () && getgid () == getegid () &&
 +	    redirects == 0 && async == 0 &&
 +	    (subshell_environment & (SUBSHELL_ASYNC | SUBSHELL_PAREN |
@@ -45,17 +45,17 @@
 +	     strcmp (args[0], "make") == 0))
 +	  {
 +	    n = strvec_len (args);
-+	    mesh_args = (char **)xmalloc ((n + 7) * sizeof (char *));
-+	    mesh_args[0] = (char *)mesh_proxy;
-+	    mesh_args[1] = "hook";
-+	    mesh_args[2] = "--shell";
-+	    mesh_args[3] = "--resolved";
-+	    mesh_args[4] = command;
-+	    mesh_args[5] = "--";
++	    switchyard_args = (char **)xmalloc ((n + 7) * sizeof (char *));
++	    switchyard_args[0] = (char *)switchyard_proxy;
++	    switchyard_args[1] = "hook";
++	    switchyard_args[2] = "--shell";
++	    switchyard_args[3] = "--resolved";
++	    switchyard_args[4] = command;
++	    switchyard_args[5] = "--";
 +	    for (i = 0; i < n; i++)
-+	      mesh_args[i + 6] = args[i];
-+	    mesh_args[n + 6] = 0;
-+	    exit (shell_execve ((char *)mesh_proxy, mesh_args, export_env));
++	      switchyard_args[i + 6] = args[i];
++	    switchyard_args[n + 6] = 0;
++	    exit (shell_execve ((char *)switchyard_proxy, switchyard_args, export_env));
 +	  }
 +      }
        exit (shell_execve (command, args, export_env));

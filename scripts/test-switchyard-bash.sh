@@ -7,33 +7,33 @@ if [[ $# -ne 2 || $1 != /* || $2 != /* || ! -x $1 || ! -x $2 ]]; then
 fi
 
 bash_bin=$1
-mesh_go=$2
-root=$(mktemp -d -p /tmp/opencode mesh-bash-test.XXXXXXXX)
+switchyard_go=$2
+root=$(mktemp -d -p /tmp/opencode switchyard-bash-test.XXXXXXXX)
 trap 'rm -rf -- "$root"' EXIT
 mkdir -m 700 "$root/repo" "$root/bin"
 printf '.env\n' > "$root/repo/.gitignore"
-printf '{"name":"mesh-bash-test","private":true}\n' > "$root/repo/package.json"
+printf '{"name":"switchyard-bash-test","private":true}\n' > "$root/repo/package.json"
 printf "lockfileVersion: '9.0'\nimporters:\n  .: {}\n" > "$root/repo/pnpm-lock.yaml"
 printf 'test source\n' > "$root/repo/README.md"
 git -C "$root/repo" init -q
 git -C "$root/repo" add .gitignore package.json pnpm-lock.yaml README.md
-git -C "$root/repo" -c user.name=MeshFixture -c user.email=fixture@invalid.local commit -qm baseline
+git -C "$root/repo" -c user.name=SwitchyardFixture -c user.email=fixture@invalid.local commit -qm baseline
 printf 'untracked work\n' > "$root/repo/new.txt"
 printf 'synthetic excluded value\n' > "$root/repo/.env"
 printf '%s\n' '#!/bin/sh' 'case "$1" in' \
   'install) exit 0 ;;' \
-  'test) if [ "${MESH_SHELL_CAPTURE-}" != "invoked after launch" ]; then exit 86; fi; printf "cwd=%s\n" "$PWD"; printf "worker edit\n" > agent-note.txt; exit 37 ;;' \
+  'test) if [ "${SWITCHYARD_SHELL_CAPTURE-}" != "invoked after launch" ]; then exit 86; fi; printf "cwd=%s\n" "$PWD"; printf "worker edit\n" > agent-note.txt; exit 37 ;;' \
   '*) exit 19 ;;' 'esac' > "$root/bin/pnpm"
 printf '%s\n' '#!/bin/sh' 'exit 44' > "$root/bin/alternate-pnpm"
 chmod 0755 "$root/bin/pnpm" "$root/bin/alternate-pnpm"
 
-export MESH_GO_HOME="$root/state" MESH_BASH_PROXY="$mesh_go" MESH_BACKEND=probe
+export SWITCHYARD_HOME="$root/state" SWITCHYARD_BASH_PROXY="$switchyard_go" SWITCHYARD_BACKEND=probe
 export PATH="$root/bin:$PATH"
-"$mesh_go" worker --root "$root/worker" init
-"$mesh_go" backend add --name probe --kind local --root "$root/worker" --priority 10 > /dev/null
+"$switchyard_go" worker --root "$root/worker" init
+"$switchyard_go" backend add --name probe --kind local --root "$root/worker" --priority 10 > /dev/null
 preview_snapshot() {
   local actual expected
-  actual=$("$mesh_go" preview --repo "$root/repo")
+  actual=$("$switchyard_go" preview --repo "$root/repo")
   expected=$'Snapshot: 5 files; 1 private paths excluded\n  + .gitignore\n  + README.md\n  + new.txt\n  + package.json\n  + pnpm-lock.yaml\n  - .env (excluded)'
   if [[ $actual != "$expected" ]]; then
     printf 'The disposable worktree selection changed:\n%s\n' "$actual" >&2
@@ -43,12 +43,12 @@ preview_snapshot() {
 }
 
 printf -v launch '%q --noprofile --norc -i' "$bash_bin"
-printf 'mesh-test: interactive\n' >&2
+printf 'switchyard-test: interactive\n' >&2
 preview_snapshot
 status=0
 (
   cd "$root/repo"
-  printf 'export MESH_SHELL_CAPTURE="invoked after launch"\ncd . && pnpm test\nexit\n' | script -q -e -c "$launch" /dev/null
+  printf 'export SWITCHYARD_SHELL_CAPTURE="invoked after launch"\ncd . && pnpm test\nexit\n' | script -q -e -c "$launch" /dev/null
 ) > "$root/session.log" || status=$?
 if [[ $status -ne 37 || -e $root/repo/agent-note.txt ]]; then
   printf 'Interactive Bash did not preserve the remote exit and source isolation\n' >&2
@@ -72,11 +72,11 @@ if [[ $patch != *'diff --git a/agent-note.txt b/agent-note.txt'* ]]; then
 fi
 
 status=0
-printf 'mesh-test: temporary environment\n' >&2
+printf 'switchyard-test: temporary environment\n' >&2
 preview_snapshot
 (
   cd "$root/repo"
-  "$bash_bin" --noprofile --norc -c 'MESH_SHELL_CAPTURE="invoked after launch" pnpm test'
+  "$bash_bin" --noprofile --norc -c 'SWITCHYARD_SHELL_CAPTURE="invoked after launch" pnpm test'
 ) > "$root/temporary.log" 2>&1 || status=$?
 if [[ $status -ne 37 || -e $root/repo/agent-note.txt ]]; then
   printf 'Bash temporary environment assignments did not route to an isolated worker\n' >&2
@@ -84,7 +84,7 @@ if [[ $status -ne 37 || -e $root/repo/agent-note.txt ]]; then
 fi
 
 status=0
-printf 'mesh-test: function and substitution fallbacks\n' >&2
+printf 'switchyard-test: function and substitution fallbacks\n' >&2
 "$bash_bin" --noprofile --norc -c 'pnpm() { return 29; }; pnpm test' || status=$?
 if [[ $status -ne 29 ]]; then
   printf 'A Bash function was intercepted as an external command\n' >&2
@@ -92,7 +92,7 @@ if [[ $status -ne 29 ]]; then
 fi
 (
   cd "$root/repo"
-  "$bash_bin" --noprofile --norc -c 'MESH_SHELL_CAPTURE="invoked after launch"; export MESH_SHELL_CAPTURE; value=$(pnpm test); [[ $value == *"cwd=$PWD"* && $value != *"Snapshot:"* ]]'
+  "$bash_bin" --noprofile --norc -c 'SWITCHYARD_SHELL_CAPTURE="invoked after launch"; export SWITCHYARD_SHELL_CAPTURE; value=$(pnpm test); [[ $value == *"cwd=$PWD"* && $value != *"Snapshot:"* ]]'
 )
 if [[ ! -e $root/repo/agent-note.txt ]]; then
   printf 'Command substitution did not stay local\n' >&2
@@ -101,7 +101,7 @@ fi
 rm -- "$root/repo/agent-note.txt"
 
 status=0
-printf 'mesh-test: resolved-path mismatch\n' >&2
+printf 'switchyard-test: resolved-path mismatch\n' >&2
 preview_snapshot
 (
   cd "$root/repo"

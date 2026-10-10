@@ -3,24 +3,24 @@ set -euo pipefail
 
 # Install the bounded stop before doing any package downloads. Shutdown stops
 # the instance; the encrypted EBS root volume is still billed until destroy.
-cat > /etc/systemd/system/compute-mesh-stop.service <<'UNIT'
+cat > /etc/systemd/system/switchyard-stop.service <<'UNIT'
 [Unit]
-Description=Stop unattended Compute Mesh worker
+Description=Stop unattended Switchyard worker
 [Service]
 Type=oneshot
 ExecStart=/usr/sbin/shutdown -h now
 UNIT
-cat > /etc/systemd/system/compute-mesh-stop.timer <<'UNIT'
+cat > /etc/systemd/system/switchyard-stop.timer <<'UNIT'
 [Unit]
-Description=Bound Compute Mesh worker uptime on every boot
+Description=Bound Switchyard worker uptime on every boot
 [Timer]
 OnBootSec=2h
-Unit=compute-mesh-stop.service
+Unit=switchyard-stop.service
 [Install]
 WantedBy=timers.target
 UNIT
 systemctl daemon-reload
-systemctl enable --now compute-mesh-stop.timer
+systemctl enable --now switchyard-stop.timer
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
@@ -56,5 +56,5 @@ for kind, option in (("subuid", "--add-subuids"), ("subgid", "--add-subgids")):
         raise SystemExit("no free subordinate ID range")
     run(["usermod", option, f"{candidate}-{candidate + size - 1}", "ubuntu"], check=True)
 PY
-install -d -m 0755 /var/lib/compute-mesh
-date -u +'%FT%TZ' > /var/lib/compute-mesh/ready
+install -d -m 0755 /var/lib/switchyard
+date -u +'%FT%TZ' > /var/lib/switchyard/ready

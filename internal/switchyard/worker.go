@@ -1,4 +1,4 @@
-package mesh
+package switchyard
 
 import (
 	"bytes"
@@ -18,7 +18,7 @@ import (
 	"time"
 )
 
-const workerMarker = "compute-mesh-go-worker-v1\n"
+const workerMarker = "switchyard-worker-v1\n"
 
 type jobRecord struct {
 	ID              string `json:"id"`
@@ -51,7 +51,7 @@ func workerReady(root string) error {
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 || info.Sys().(*syscall.Stat_t).Uid != uint32(os.Getuid()) {
 		return errors.New("worker root is not initialized")
 	}
-	marker, err := privateRead(filepath.Join(root, ".compute-mesh-worker"), 100)
+	marker, err := privateRead(filepath.Join(root, ".switchyard-worker"), 100)
 	if err != nil || string(marker) != workerMarker {
 		return errors.New("worker root has no ownership marker")
 	}
@@ -66,7 +66,7 @@ func initWorker(root string) error {
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return errors.New("worker root must be a private directory")
 		}
-		if _, markerErr := os.Lstat(filepath.Join(root, ".compute-mesh-worker")); os.IsNotExist(markerErr) {
+		if _, markerErr := os.Lstat(filepath.Join(root, ".switchyard-worker")); os.IsNotExist(markerErr) {
 			entries, err := os.ReadDir(root)
 			if err != nil || len(entries) > 0 {
 				return errors.New("worker root already contains unrelated files")
@@ -80,7 +80,7 @@ func initWorker(root string) error {
 	if err := privateTree(root); err != nil {
 		return err
 	}
-	if err := writeAtomic(filepath.Join(root, ".compute-mesh-worker"), []byte(workerMarker)); err != nil {
+	if err := writeAtomic(filepath.Join(root, ".switchyard-worker"), []byte(workerMarker)); err != nil {
 		return err
 	}
 	return privateTree(filepath.Join(root, "projects"))
@@ -466,7 +466,7 @@ cd "$4" || exit 2
 : > "$3" || exit 2
 shift 4
 exec "$@"`
-	params := append([]string{"-c", script, "mesh-node-setup", root, manager, marker, target}, argv...)
+	params := append([]string{"-c", script, "switchyard-node-setup", root, manager, marker, target}, argv...)
 	return exec.Command("/bin/sh", params...), true, nil
 }
 

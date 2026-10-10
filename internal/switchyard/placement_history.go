@@ -1,10 +1,12 @@
-package mesh
+package switchyard
 
 import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -92,7 +94,13 @@ func readObservations(home string) (map[string]commandHistory, error) {
 }
 
 func recordCommandObservation(home, signature, backend string, wall, cpu time.Duration) error {
-	if !snapshotPattern.MatchString(signature) || !remoteName.MatchString(backend) || wall <= 0 || wall > 24*time.Hour || cpu < 0 || cpu > wall*256 {
+	if !snapshotPattern.MatchString(signature) || !remoteName.MatchString(backend) || wall <= 0 || wall > 24*time.Hour || cpu < 0 {
+		return errors.New("invalid command observation")
+	}
+	sample := commandObservation{WallMS: max(1, wall.Milliseconds()), CPUMS: cpu.Milliseconds()}
+	// Validate the serialized units too: truncating wall time to milliseconds
+	// can turn a valid duration pair into an unreadable history entry.
+	if sample.CPUMS > sample.WallMS*256 {
 		return errors.New("invalid command observation")
 	}
 	directory := filepath.Join(home, "observations")
@@ -121,7 +129,7 @@ func recordCommandObservation(home, signature, backend string, wall, cpu time.Du
 	if command.Backends == nil {
 		command.Backends = make(map[string][]commandObservation)
 	}
-	samples := append(command.Backends[backend], commandObservation{WallMS: max(1, wall.Milliseconds()), CPUMS: cpu.Milliseconds()})
+	samples := append(command.Backends[backend], sample)
 	if len(samples) > maxSamplesPerBackend {
 		samples = samples[len(samples)-maxSamplesPerBackend:]
 	}
@@ -180,4 +188,68 @@ func preferredObservedBackend(home, signature string, available []string) string
 		}
 	}
 	return best
+}
+
+// writeStatistics shows only hashed command identities and backend names. Each
+// backend retains at most five samples per command, not a lifetime total.
+func writeStatistics(home string, configured []shellProvider, output io.Writer, limit int) error {
+	history, err := readObservations(home)
+	if err != nil {
+		return err
+	}
+	known := map[string]string{"local": "local"}
+	for _, provider := range configured {
+		known[observedBackendID(provider)] = provider.Name()
+	}
+	type row struct {
+		signature string
+		seen      int64
+	}
+	rows := make([]row, 0, len(history))
+	for signature, entry := range history {
+		rows = append(rows, row{signature, entry.LastSeen})
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].seen == rows[j].seen {
+			return rows[i].signature < rows[j].signature
+		}
+		return rows[i].seen > rows[j].seen
+	})
+	if _, err := fmt.Fprintf(output, "Commands observed: %d (at most %d recent samples per backend)\n", len(rows), maxSamplesPerBackend); err != nil {
+		return err
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	if len(rows) > limit {
+		rows = rows[:limit]
+	}
+	if _, err := fmt.Fprintln(output, "Command hash  Backend             Samples  Median wall (ms)"); err != nil {
+		return err
+	}
+	for _, item := range rows {
+		entry := history[item.signature]
+		backends := make([]string, 0, len(entry.Backends))
+		for backend := range entry.Backends {
+			backends = append(backends, backend)
+		}
+		sort.Slice(backends, func(i, j int) bool {
+			return known[backends[i]]+backends[i] < known[backends[j]]+backends[j]
+		})
+		for _, backend := range backends {
+			label := known[backend]
+			if label == "" {
+				label = backend[:min(len(backend), 13)]
+			}
+			samples := entry.Backends[backend]
+			median := medianWall(samples)
+			if len(samples) == 1 {
+				median = samples[0].WallMS
+			}
+			if _, err := fmt.Fprintf(output, "%-13s %-19s %7d %17d\n", item.signature[:12], label, len(samples), median); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

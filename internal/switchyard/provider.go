@@ -1,4 +1,4 @@
-package mesh
+package switchyard
 
 import (
 	"bytes"
@@ -125,6 +125,44 @@ func loadBackends(home string) ([]backendConfig, error) {
 		seen[cfg.Name] = true
 	}
 	return data.Backends, nil
+}
+
+// A destroyed managed worker has no SSH key or known-hosts file. Drop only the
+// matching managed backend without validating the now-absent key material.
+func removeDestroyedAWSBackend(home, dir string) error {
+	path := configFile(home)
+	content, err := privateRead(path, 1<<20)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return errors.New("backend configuration is invalid")
+	}
+	var data backendFile
+	if err := json.Unmarshal(content, &data); err != nil {
+		return errors.New("backend configuration is invalid")
+	}
+	remaining := make([]backendConfig, 0, len(data.Backends))
+	removed := false
+	for _, cfg := range data.Backends {
+		if cfg.Name != "aws" {
+			remaining = append(remaining, cfg)
+			continue
+		}
+		if removed || cfg.Kind != "ssh" || cfg.Root != awsRoot || cfg.Command != awsCommand ||
+			cfg.Identity != awsKeyPath(dir) || cfg.KnownHosts != awsKnownPath(dir) || cfg.HostKeyAlias != awsName {
+			return errors.New("managed AWS backend does not match the tracked worker")
+		}
+		removed = true
+	}
+	if !removed {
+		return nil
+	}
+	content, err = json.MarshalIndent(backendFile{Backends: remaining}, "", "  ")
+	if err != nil {
+		return errors.New("could not update backend configuration")
+	}
+	return writeAtomic(path, append(content, '\n'))
 }
 
 func saveBackend(home string, cfg backendConfig) error {

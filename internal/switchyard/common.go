@@ -1,4 +1,4 @@
-package mesh
+package switchyard
 
 import (
 	"crypto/rand"
@@ -22,7 +22,7 @@ const (
 	maxPatchSize    = 64 << 20
 	maxLogSize      = 128 << 20
 	maxWireRequest  = 2 << 20
-	manifestName    = ".compute-mesh-manifest.json"
+	manifestName    = ".switchyard-manifest.json"
 )
 
 var (
@@ -63,11 +63,11 @@ func workerEnvironment(environment []string, cwd string) []string {
 	result := make([]string, 0, len(environment)+2)
 	for _, entry := range environment {
 		name, _, _ := strings.Cut(entry, "=")
-		if name != "PWD" && name != "MESH_BACKEND" {
+		if name != "PWD" && name != "SWITCHYARD_BACKEND" {
 			result = append(result, entry)
 		}
 	}
-	return append(result, "PWD="+cwd, "MESH_BACKEND=local")
+	return append(result, "PWD="+cwd, "SWITCHYARD_BACKEND=local")
 }
 
 func randomID() (string, error) {
@@ -79,14 +79,14 @@ func randomID() (string, error) {
 }
 
 func dataHome() (string, error) {
-	if override := os.Getenv("MESH_GO_HOME"); override != "" {
+	if override := os.Getenv("SWITCHYARD_HOME"); override != "" {
 		return filepath.Abs(override)
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", errors.New("could not locate the home directory")
 	}
-	return filepath.Join(home, ".local", "share", "compute-mesh-go"), nil
+	return filepath.Join(home, ".local", "share", "switchyard"), nil
 }
 
 func privateDir(path string) error {

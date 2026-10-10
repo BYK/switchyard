@@ -1,4 +1,4 @@
-package mesh
+package switchyard
 
 import (
 	"bytes"
@@ -77,7 +77,7 @@ func loadImage(root string) (workerImage, error) {
 	if json.Unmarshal(content, &config) != nil || !validImageID(config.ID) || config.Runtime != "podman" && config.Runtime != "docker" {
 		return workerImage{}, errors.New("worker image configuration is invalid; rebuild it with switchyard image build")
 	}
-	if requested := os.Getenv("MESH_CONTAINER_RUNTIME"); requested != "" && config.Runtime != requested {
+	if requested := os.Getenv("SWITCHYARD_CONTAINER_RUNTIME"); requested != "" && config.Runtime != requested {
 		return workerImage{}, errors.New("worker image belongs to another container runtime; rebuild it with switchyard image build")
 	}
 	if err := inspectRuntimeImage(config.Runtime, config.ID); err != nil {
@@ -107,7 +107,7 @@ func buildNodeImage(home string) (string, error) {
 	if engine == "podman" {
 		// An empty context prevents accidentally copying the invoking project into
 		// the image. Podman accepts a Containerfile from stdin with -f -.
-		contextDir, err := os.MkdirTemp("", "mesh-node-image-*")
+		contextDir, err := os.MkdirTemp("", "switchyard-node-image-*")
 		if err != nil {
 			return "", errors.New("could not prepare Node image build context")
 		}
