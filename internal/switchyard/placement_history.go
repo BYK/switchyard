@@ -56,6 +56,9 @@ func observationFile(home string) string {
 }
 
 func observedBackendID(provider shellProvider) string {
+	if provider.cfg.ObservationID != "" {
+		return provider.cfg.ObservationID
+	}
 	digest := sha256.Sum256([]byte(provider.Name() + "\x00" + endpointID(provider.cfg) + "\x00" + provider.cfg.Command + "\x00" + provider.cfg.Identity))
 	return "p" + hex.EncodeToString(digest[:15])
 }

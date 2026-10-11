@@ -3,7 +3,9 @@ package switchyard
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -481,10 +483,14 @@ func awsConfigure(home, dir string, info awsInstance) error {
 	if err != nil {
 		return err
 	}
+	// New instances get a new identity; a stopped instance keeps its recorded
+	// identity when upsertAWSBackend updates its changed public address.
+	digest := sha256.Sum256([]byte(info.InstanceID + "\x00" + awsName))
 	return upsertAWSBackend(home, backendConfig{
 		Name: "aws", Kind: "ssh", Root: awsRoot, Host: ip, User: "ubuntu",
 		Identity: awsKeyPath(dir), KnownHosts: awsKnownPath(dir), HostKeyAlias: awsName,
 		Command: awsCommand, Priority: 10, Capabilities: []string{"cpu"},
+		ObservationID: "p" + hex.EncodeToString(digest[:15]),
 	})
 }
 
