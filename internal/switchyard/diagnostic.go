@@ -1,4 +1,4 @@
-package mesh
+package switchyard
 
 import (
 	"fmt"
@@ -9,7 +9,7 @@ import (
 // Diagnostics contain only fixed phase/result labels and timings. In particular,
 // never log commands, paths, cloud responses or the invocation environment.
 func debugEvent(phase, result string, started time.Time) {
-	if os.Getenv("MESH_DEBUG") != "1" {
+	if os.Getenv("SWITCHYARD_DEBUG") != "1" {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "switchyard: debug phase=%s result=%s elapsed_ms=%d\n",

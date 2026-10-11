@@ -1,4 +1,4 @@
-package mesh
+package switchyard
 
 import (
 	"bufio"
@@ -62,7 +62,7 @@ func binary(t *testing.T) string {
 func command(t *testing.T, exe, home string, args ...string) (int, string) {
 	t.Helper()
 	cmd := exec.Command(exe, args...)
-	cmd.Env = append(os.Environ(), "MESH_GO_HOME="+home)
+	cmd.Env = append(os.Environ(), "SWITCHYARD_HOME="+home)
 	output, err := cmd.CombinedOutput()
 	if err == nil {
 		return 0, string(output)
@@ -276,16 +276,16 @@ func TestRunForwardsInvocationEnvironmentWithoutWorkerInheritance(t *testing.T) 
 	root := fixture(t)
 	home := t.TempDir()
 	exe := binary(t)
-	t.Setenv("MESH_WORKER_ONLY_TEST", "worker-only")
+	t.Setenv("SWITCHYARD_WORKER_ONLY_TEST", "worker-only")
 	value := "invocation value with 'quotes' and\na newline"
 	cmd := exec.Command(exe, "run", "--backend", "local", "--repo", root,
-		"--", "sh", "-c", `test "$MESH_INVOCATION_TEST" = "$1" && test -z "${MESH_WORKER_ONLY_TEST+x}" && test "$MESH_BACKEND" = local && test "$PWD" = "$(pwd)"`, "mesh-test", value)
+		"--", "sh", "-c", `test "$SWITCHYARD_INVOCATION_TEST" = "$1" && test -z "${SWITCHYARD_WORKER_ONLY_TEST+x}" && test "$SWITCHYARD_BACKEND" = local && test "$PWD" = "$(pwd)"`, "switchyard-test", value)
 	for _, entry := range os.Environ() {
-		if !strings.HasPrefix(entry, "MESH_WORKER_ONLY_TEST=") {
+		if !strings.HasPrefix(entry, "SWITCHYARD_WORKER_ONLY_TEST=") {
 			cmd.Env = append(cmd.Env, entry)
 		}
 	}
-	cmd.Env = append(cmd.Env, "MESH_GO_HOME="+home, "MESH_INVOCATION_TEST="+value)
+	cmd.Env = append(cmd.Env, "SWITCHYARD_HOME="+home, "SWITCHYARD_INVOCATION_TEST="+value)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("worker did not receive the invocation environment: %v %s", err, output)
@@ -303,8 +303,8 @@ func TestEnvironmentValidationAndWorkerOverrides(t *testing.T) {
 			t.Fatal("invalid invocation environment was accepted")
 		}
 	}
-	environment := workerEnvironment([]string{"A=quoted 'value'\nand newline", "PWD=/source", "MESH_BACKEND=remote"}, "/worker/checkout")
-	if !equalPaths(environment, []string{"A=quoted 'value'\nand newline", "PWD=/worker/checkout", "MESH_BACKEND=local"}) {
+	environment := workerEnvironment([]string{"A=quoted 'value'\nand newline", "PWD=/source", "SWITCHYARD_BACKEND=remote"}, "/worker/checkout")
+	if !equalPaths(environment, []string{"A=quoted 'value'\nand newline", "PWD=/worker/checkout", "SWITCHYARD_BACKEND=local"}) {
 		t.Fatal("worker did not preserve invocation values and replace worker-specific state")
 	}
 }
@@ -320,7 +320,7 @@ func TestCommandReturnsExitStatusWhileStdinRemainsOpen(t *testing.T) {
 		}
 		cmd := exec.Command(exe, "run", "--backend", "local", "--repo", root,
 			"--", "sh", "-c", fmt.Sprintf("exit %d", expected))
-		cmd.Env = append(os.Environ(), "MESH_GO_HOME="+home)
+		cmd.Env = append(os.Environ(), "SWITCHYARD_HOME="+home)
 		cmd.Stdin = input
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		if err := cmd.Start(); err != nil {
@@ -342,7 +342,7 @@ func TestCommandReturnsExitStatusWhileStdinRemainsOpen(t *testing.T) {
 			input.Close()
 			holdOpen.Close()
 			<-result
-			t.Fatal("Mesh waited for terminal stdin after the command exited")
+			t.Fatal("Switchyard waited for terminal stdin after the command exited")
 		}
 	}
 }
@@ -352,7 +352,7 @@ func TestNodeJobsInstallInEachCheckoutAndReportSetupFailures(t *testing.T) {
 	home := t.TempDir()
 	exe := binary(t)
 	for name, value := range map[string]string{
-		"package.json":   `{"name":"mesh-node-fixture","private":true,"scripts":{"test":"node test.js"}}`,
+		"package.json":   `{"name":"switchyard-node-fixture","private":true,"scripts":{"test":"node test.js"}}`,
 		"pnpm-lock.yaml": "lockfileVersion: '9.0'\nimporters:\n  .: {}\n",
 	} {
 		if err := os.WriteFile(filepath.Join(root, name), []byte(value), 0o600); err != nil {
@@ -363,8 +363,8 @@ func TestNodeJobsInstallInEachCheckoutAndReportSetupFailures(t *testing.T) {
 	trace := filepath.Join(t.TempDir(), "install-trace")
 	pnpm := `#!/bin/sh
 if [ "$1" = install ]; then
-  printf 'install\n' >> "$MESH_TEST_INSTALL_TRACE"
-  [ "$MESH_TEST_INSTALL_FAIL" != 1 ] || exit 29
+  printf 'install\n' >> "$SWITCHYARD_TEST_INSTALL_TRACE"
+  [ "$SWITCHYARD_TEST_INSTALL_FAIL" != 1 ] || exit 29
   mkdir -p node_modules
   printf 'ready\n' > node_modules/fixture
   exit 0
@@ -378,7 +378,7 @@ exit 37
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", tools+string(os.PathListSeparator)+os.Getenv("PATH"))
-	t.Setenv("MESH_TEST_INSTALL_TRACE", trace)
+	t.Setenv("SWITCHYARD_TEST_INSTALL_TRACE", trace)
 	for run := 0; run < 2; run++ {
 		status, output := command(t, exe, home, "run", "--backend", "local", "--repo", root, "--", "pnpm", "test")
 		if status != 37 || !strings.Contains(output, "node command ran") {
@@ -392,7 +392,7 @@ exit 37
 	if _, err := os.Stat(filepath.Join(root, "node_modules")); !os.IsNotExist(err) {
 		t.Fatal("Node setup wrote to the live source")
 	}
-	t.Setenv("MESH_TEST_INSTALL_FAIL", "1")
+	t.Setenv("SWITCHYARD_TEST_INSTALL_FAIL", "1")
 	status, output := command(t, exe, home, "run", "--backend", "local", "--repo", root, "--", "pnpm", "test")
 	if status != 2 || !strings.Contains(output, "dependency setup") || strings.Contains(output, "node command ran") {
 		t.Fatalf("failed setup was misreported as a command result: %d %s", status, output)
@@ -409,8 +409,8 @@ func TestNpmJobUsesCleanInstall(t *testing.T) {
 	home := t.TempDir()
 	exe := binary(t)
 	for name, content := range map[string]string{
-		"package.json":      `{"name":"mesh-npm-fixture","private":true}`,
-		"package-lock.json": `{"name":"mesh-npm-fixture","lockfileVersion":3,"packages":{"":{}}}`,
+		"package.json":      `{"name":"switchyard-npm-fixture","private":true}`,
+		"package-lock.json": `{"name":"switchyard-npm-fixture","lockfileVersion":3,"packages":{"":{}}}`,
 	} {
 		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o600); err != nil {
 			t.Fatal(err)
@@ -446,7 +446,7 @@ func TestProxyKeepsStandardStreamsSeparate(t *testing.T) {
 		t.Fatalf("configure worker: %s", output)
 	}
 	cmd := exec.Command(exe, "proxy", "--backend", "sandbox", "--repo", root, "--", "sh", "-c", `IFS= read -r input; printf 'stdout:%s\n' "$input"; printf 'stderr\n' >&2; exit 37`)
-	cmd.Env = append(os.Environ(), "MESH_GO_HOME="+home)
+	cmd.Env = append(os.Environ(), "SWITCHYARD_HOME="+home)
 	cmd.Stdin = strings.NewReader("from stdin\n")
 	var stdout, stderr strings.Builder
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -467,7 +467,7 @@ func TestProxyLocalRunsOriginalCommandWithoutCapturing(t *testing.T) {
 	home := t.TempDir()
 	exe := binary(t)
 	cmd := exec.Command(exe, "proxy", "--backend", "local", "--repo", t.TempDir(), "--", "sh", "-c", "printf local-only; exit 19")
-	cmd.Env = append(os.Environ(), "MESH_GO_HOME="+home)
+	cmd.Env = append(os.Environ(), "SWITCHYARD_HOME="+home)
 	var stdout, stderr strings.Builder
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
@@ -504,17 +504,13 @@ func TestShellEntrypointRoutesAbsoluteToolAndPreservesOtherShellSyntax(t *testin
 	if err := os.WriteFile(tool, []byte("#!/bin/sh\nif [ \"$1\" = install ]; then mkdir node_modules; exit 0; fi\ntest -d node_modules || exit 91\nprintf 'from worker\\n'\nprintf 'remote edit\\n' > agent-note.txt\nexit 37\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	shell := filepath.Join(t.TempDir(), "meshell")
+	shell := filepath.Join(t.TempDir(), "switchyard-shell")
 	if err := os.Symlink(exe, shell); err != nil {
-		t.Fatal(err)
-	}
-	legacy := filepath.Join(t.TempDir(), "mesh-shell")
-	if err := os.Symlink(exe, legacy); err != nil {
 		t.Fatal(err)
 	}
 	run := func(script string) (int, string, string) {
 		cmd := exec.Command(shell, "-c", script)
-		cmd.Dir, cmd.Env = root, append(os.Environ(), "MESH_GO_HOME="+home, "MESH_BACKEND=sandbox", "PATH="+filepath.Dir(tool)+":"+os.Getenv("PATH"))
+		cmd.Dir, cmd.Env = root, append(os.Environ(), "SWITCHYARD_HOME="+home, "SWITCHYARD_BACKEND=sandbox", "PATH="+filepath.Dir(tool)+":"+os.Getenv("PATH"))
 		var stdout, stderr strings.Builder
 		cmd.Stdout, cmd.Stderr = &stdout, &stderr
 		err := cmd.Run()
@@ -531,11 +527,6 @@ func TestShellEntrypointRoutesAbsoluteToolAndPreservesOtherShellSyntax(t *testin
 	if status != 37 || stdout != "from worker\n" || stderr != "" {
 		t.Fatalf("absolute tool was not transparently routed: %d %q %q", status, stdout, stderr)
 	}
-	old := exec.Command(legacy, "-c", tool+" test")
-	old.Dir, old.Env = root, append(os.Environ(), "MESH_GO_HOME="+home, "MESH_BACKEND=sandbox", "PATH="+filepath.Dir(tool)+":"+os.Getenv("PATH"))
-	if output, err := old.CombinedOutput(); err == nil || err.(*exec.ExitError).ExitCode() != 37 || string(output) != "from worker\n" {
-		t.Fatalf("legacy shell entrypoint changed: %v %q", err, output)
-	}
 	if _, err := os.Stat(filepath.Join(root, "agent-note.txt")); !os.IsNotExist(err) {
 		t.Fatal("remote edits reached the live source")
 	}
@@ -545,7 +536,7 @@ func TestShellEntrypointRoutesAbsoluteToolAndPreservesOtherShellSyntax(t *testin
 	}
 	if _, err := exec.LookPath("node"); err == nil {
 		child := exec.Command("node", "-e", `const {spawnSync} = require('node:child_process'); const r = spawnSync(process.argv[1] + ' test', [], {shell: process.argv[2], encoding: 'utf8', env: {...process.env, PATH: process.argv[3] + ':' + process.env.PATH}}); process.stdout.write(r.stdout); process.stderr.write(r.stderr); process.exit(r.status)`, tool, shell, filepath.Dir(tool))
-		child.Dir, child.Env = root, append(os.Environ(), "MESH_GO_HOME="+home, "MESH_BACKEND=sandbox", "PATH="+filepath.Dir(tool)+":"+os.Getenv("PATH"))
+		child.Dir, child.Env = root, append(os.Environ(), "SWITCHYARD_HOME="+home, "SWITCHYARD_BACKEND=sandbox", "PATH="+filepath.Dir(tool)+":"+os.Getenv("PATH"))
 		var output, errorOutput strings.Builder
 		child.Stdout, child.Stderr = &output, &errorOutput
 		if err := child.Run(); err == nil || err.(*exec.ExitError).ExitCode() != 37 || output.String() != "from worker\n" || errorOutput.Len() != 0 {
@@ -560,7 +551,7 @@ func TestRealPnpmBuildUsesWorkerCheckout(t *testing.T) {
 	}
 	root := fixture(t)
 	for name, content := range map[string]string{
-		"package.json":   `{"name":"mesh-node-build","private":true,"scripts":{"build":"node build.mjs"}}`,
+		"package.json":   `{"name":"switchyard-node-build","private":true,"scripts":{"build":"node build.mjs"}}`,
 		"pnpm-lock.yaml": "lockfileVersion: '9.0'\nsettings:\n  autoInstallPeers: true\n  excludeLinksFromLockfile: false\nimporters:\n  .: {}\n",
 		"build.mjs":      `import { mkdirSync, writeFileSync } from 'node:fs'; mkdirSync('dist'); writeFileSync('dist/result.txt', 'built on worker'); console.log('built')`,
 	} {
@@ -655,7 +646,7 @@ func TestWorkerRootRefusesUnrelatedDirectory(t *testing.T) {
 	if err := initWorker(root); err == nil {
 		t.Fatal("worker took over a nonempty unrelated directory")
 	}
-	if err := os.WriteFile(filepath.Join(root, ".compute-mesh-worker"), []byte("wrong owner"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, ".switchyard-worker"), []byte("wrong owner"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := initWorker(root); err == nil {
@@ -669,7 +660,7 @@ func TestCancelStopsRunningProcessGroup(t *testing.T) {
 	exe := binary(t)
 	run := exec.Command(exe, "run", "--backend", "local", "--repo", root,
 		"--", "sh", "-c", "printf 'child started\\n'; sleep 30")
-	run.Env = append(os.Environ(), "MESH_GO_HOME="+home)
+	run.Env = append(os.Environ(), "SWITCHYARD_HOME="+home)
 	stdout, err := run.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -750,7 +741,7 @@ func TestCancelDuringNodeSetupNeverStartsRequestedCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := exec.Command(exe, "run", "--backend", "local", "--repo", root, "--", "pnpm", "test")
-	run.Env = append(os.Environ(), "MESH_GO_HOME="+home, "PATH="+tools+":"+os.Getenv("PATH"))
+	run.Env = append(os.Environ(), "SWITCHYARD_HOME="+home, "PATH="+tools+":"+os.Getenv("PATH"))
 	stdout, err := run.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -824,7 +815,7 @@ func TestHookPreservesLocalCommandAndRoutesConfiguredBackend(t *testing.T) {
 	if status != 0 {
 		t.Fatalf("could not install shims: %s", output)
 	}
-	for _, name := range []string{"meshell", "mesh-shell"} {
+	for _, name := range []string{"switchyard-shell"} {
 		if link, err := os.Readlink(filepath.Join(shimDirectory(home), name)); err != nil || link != exe {
 			t.Fatalf("hook install omitted %s: %v", name, err)
 		}
@@ -845,7 +836,7 @@ func TestHookPreservesLocalCommandAndRoutesConfiguredBackend(t *testing.T) {
 	path := shimDirectory(home) + ":" + toolDir + ":" + os.Getenv("PATH")
 	shim := filepath.Join(shimDirectory(home), "pnpm")
 	local := exec.Command(shim, "--version")
-	local.Dir, local.Env = root, append(os.Environ(), "MESH_GO_HOME="+home, "MESH_BACKEND=local", "PATH="+path)
+	local.Dir, local.Env = root, append(os.Environ(), "SWITCHYARD_HOME="+home, "SWITCHYARD_BACKEND=local", "PATH="+path)
 	if err := local.Run(); err == nil || err.(*exec.ExitError).ExitCode() != 23 {
 		t.Fatalf("hook failed to preserve original tool exit: %v", err)
 	}
@@ -856,7 +847,7 @@ func TestHookPreservesLocalCommandAndRoutesConfiguredBackend(t *testing.T) {
 		t.Fatal(err)
 	}
 	remote := exec.Command(shim, "test")
-	remote.Dir, remote.Env = root, append(os.Environ(), "MESH_GO_HOME="+home, "MESH_BACKEND=fixture", "PATH="+path)
+	remote.Dir, remote.Env = root, append(os.Environ(), "SWITCHYARD_HOME="+home, "SWITCHYARD_BACKEND=fixture", "PATH="+path)
 	result, err := remote.CombinedOutput()
 	if err == nil || err.(*exec.ExitError).ExitCode() != 37 || !strings.Contains(string(result), "exit 37") {
 		t.Fatalf("eligible command was not routed: %v %s", err, result)
@@ -865,7 +856,7 @@ func TestHookPreservesLocalCommandAndRoutesConfiguredBackend(t *testing.T) {
 		t.Fatal("hook applied worker edits to source")
 	}
 	if script, err := exec.LookPath("script"); err == nil {
-		env := append(os.Environ(), "MESH_GO_HOME="+home, "MESH_BACKEND=fixture", "PATH="+path, "SHELL=/usr/bin/bash")
+		env := append(os.Environ(), "SWITCHYARD_HOME="+home, "SWITCHYARD_BACKEND=fixture", "PATH="+path, "SHELL=/usr/bin/bash")
 		shimTTY := exec.Command(script, "-q", "-e", "-c", shim+" test", "/dev/null")
 		shimTTY.Dir, shimTTY.Env = root, env
 		if result, err := shimTTY.CombinedOutput(); err == nil || err.(*exec.ExitError).ExitCode() != 91 {
@@ -886,7 +877,7 @@ func TestHookPreservesLocalCommandAndRoutesConfiguredBackend(t *testing.T) {
 	}
 	for _, backend := range []string{"auto", "fixture"} {
 		selected := exec.Command(exe, "hook", "--shell", "--resolved", alternative, "--", "pnpm", "test")
-		selected.Dir, selected.Env = root, append(os.Environ(), "MESH_GO_HOME="+home, "MESH_BACKEND="+backend, "PATH="+path)
+		selected.Dir, selected.Env = root, append(os.Environ(), "SWITCHYARD_HOME="+home, "SWITCHYARD_BACKEND="+backend, "PATH="+path)
 		result, err := selected.CombinedOutput()
 		expected := 44
 		if backend == "fixture" {
@@ -931,7 +922,7 @@ func TestSSHProviderTransfersAndPinsSnapshot(t *testing.T) {
 	}
 	known := filepath.Join(server, "known_hosts")
 	keyParts := strings.Fields(string(pub))
-	if err := os.WriteFile(known, []byte("mesh-test "+keyParts[0]+" "+keyParts[1]+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(known, []byte("switchyard-test "+keyParts[0]+" "+keyParts[1]+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -979,7 +970,7 @@ func TestSSHProviderTransfersAndPinsSnapshot(t *testing.T) {
 	}
 	cfg := backendConfig{Name: "loopback", Kind: "ssh", Root: worker,
 		Host: "127.0.0.1", User: account.Username, Port: port, Command: exe,
-		Identity: clientKey, KnownHosts: known, HostKeyAlias: "mesh-test"}
+		Identity: clientKey, KnownHosts: known, HostKeyAlias: "switchyard-test"}
 	if err := saveBackend(home, cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -992,7 +983,7 @@ func TestSSHProviderTransfersAndPinsSnapshot(t *testing.T) {
 		t.Fatal("SSH worker wrote into the source tree")
 	}
 	proxy := exec.Command(exe, "proxy", "--backend", "loopback", "--repo", root, "--", "sh", "-c", `IFS= read -r input; printf 'ssh-stdout:%s\n' "$input"; printf 'ssh-stderr\n' >&2; exit 37`)
-	proxy.Env = append(os.Environ(), "MESH_GO_HOME="+home)
+	proxy.Env = append(os.Environ(), "SWITCHYARD_HOME="+home)
 	proxy.Stdin = strings.NewReader("over-ssh\n")
 	var stdout, stderr strings.Builder
 	proxy.Stdout, proxy.Stderr = &stdout, &stderr
@@ -1004,12 +995,12 @@ func TestSSHProviderTransfersAndPinsSnapshot(t *testing.T) {
 	}
 	value := "synthetic quoted 'value' with\na newline"
 	forwarded := exec.Command(exe, "run", "--backend", "loopback", "--repo", root,
-		"--", "sh", "-c", `test "$MESH_SSH_ENV_TEST" = "$1" && test "$MESH_BACKEND" = local && test "$PWD" = "$(pwd)"`, "mesh-test", value)
-	forwarded.Env = append(os.Environ(), "MESH_GO_HOME="+home, "MESH_SSH_ENV_TEST="+value)
+		"--", "sh", "-c", `test "$SWITCHYARD_SSH_ENV_TEST" = "$1" && test "$SWITCHYARD_BACKEND" = local && test "$PWD" = "$(pwd)"`, "switchyard-test", value)
+	forwarded.Env = append(os.Environ(), "SWITCHYARD_HOME="+home, "SWITCHYARD_SSH_ENV_TEST="+value)
 	if output, err := forwarded.CombinedOutput(); err != nil {
 		t.Fatalf("SSH worker lost the invocation environment: %v %s", err, output)
 	}
-	if err := os.WriteFile(known, []byte("mesh-test ssh-ed25519 WRONGKEY\n"), 0o600); err != nil {
+	if err := os.WriteFile(known, []byte("switchyard-test ssh-ed25519 WRONGKEY\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	status, output = command(t, exe, home, "run", "--backend", "loopback", "--repo", root, "--", "sh", "-c", "true")
@@ -1041,7 +1032,7 @@ func TestExternalProviderContract(t *testing.T) {
   source="$2"
   exec /usr/bin/rsync -a --checksum --delete -- "$source/" "$root/projects/$project/jobs/$job/incoming/files/"
 fi
-export MESH_WORKER_ONLY_TEST=worker-only
+export SWITCHYARD_WORKER_ONLY_TEST=worker-only
 PATH=/usr/bin:/bin
 export PATH
 exec %q "$@"
@@ -1097,8 +1088,8 @@ exec %q "$@"
 		t.Fatalf("idle host selected a remote backend: %q", name)
 	}
 	pluginRun := exec.Command(exe, "run", "--backend", "custom", "--repo", root,
-		"--", "sh", "-c", `test "$MESH_PLUGIN_ENV_TEST" = 'from invocation' && test -z "${MESH_WORKER_ONLY_TEST+x}" && test "$MESH_BACKEND" = local`)
-	pluginRun.Env = append(os.Environ(), "MESH_GO_HOME="+home, "MESH_PLUGIN_ENV_TEST=from invocation")
+		"--", "sh", "-c", `test "$SWITCHYARD_PLUGIN_ENV_TEST" = 'from invocation' && test -z "${SWITCHYARD_WORKER_ONLY_TEST+x}" && test "$SWITCHYARD_BACKEND" = local`)
+	pluginRun.Env = append(os.Environ(), "SWITCHYARD_HOME="+home, "SWITCHYARD_PLUGIN_ENV_TEST=from invocation")
 	if output, err := pluginRun.CombinedOutput(); err != nil {
 		t.Fatalf("plugin worker did not isolate the invocation environment: %v %s", err, output)
 	}
@@ -1106,13 +1097,13 @@ exec %q "$@"
 	if err := os.Mkdir(tools, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	tool := filepath.Join(tools, "mesh-env-probe")
-	if err := os.WriteFile(tool, []byte("#!/bin/sh\ntest \"$MESH_PLUGIN_ENV_TEST\" = 'from invocation'\n"), 0o700); err != nil {
+	tool := filepath.Join(tools, "switchyard-env-probe")
+	if err := os.WriteFile(tool, []byte("#!/bin/sh\ntest \"$SWITCHYARD_PLUGIN_ENV_TEST\" = 'from invocation'\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	fromPath := exec.Command(exe, "run", "--backend", "custom", "--repo", root,
-		"--", "mesh-env-probe")
-	fromPath.Env = append(os.Environ(), "MESH_GO_HOME="+home, "MESH_PLUGIN_ENV_TEST=from invocation",
+		"--", "switchyard-env-probe")
+	fromPath.Env = append(os.Environ(), "SWITCHYARD_HOME="+home, "SWITCHYARD_PLUGIN_ENV_TEST=from invocation",
 		"PATH="+tools+":"+os.Getenv("PATH"))
 	if output, err := fromPath.CombinedOutput(); err != nil {
 		t.Fatalf("worker did not resolve a tool using the invocation PATH: %v %s", err, output)

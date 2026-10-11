@@ -1,4 +1,4 @@
-package mesh
+package switchyard
 
 import (
 	"bufio"
@@ -151,7 +151,20 @@ func selectProvider(ctx context.Context, home, self, requested string, required 
 	if requested != "auto" {
 		provider, err := currentBackend(home, self, requested)
 		if err != nil {
-			return shellProvider{}, "", err
+			if !isAWSWorker(requested) {
+				return shellProvider{}, "", err
+			}
+			dir, dirErr := awsDirectory()
+			if dirErr != nil {
+				return shellProvider{}, "", dirErr
+			}
+			if waitErr := awsWaitReady(ctx, home, self, requested, dir); waitErr != nil {
+				return shellProvider{}, "", waitErr
+			}
+			provider, err = currentBackend(home, self, requested)
+			if err != nil {
+				return shellProvider{}, "", err
+			}
 		}
 		if !supports(provider.cfg, required) {
 			return shellProvider{}, "", errors.New("backend does not advertise the required capabilities")
@@ -161,7 +174,20 @@ func selectProvider(ctx context.Context, home, self, requested string, required 
 				return shellProvider{}, "", err
 			}
 		} else if !provider.Ready(ctx) {
-			return shellProvider{}, "", errors.New("requested backend is not ready")
+			if !isAWSWorker(requested) {
+				return shellProvider{}, "", errors.New("requested backend is not ready")
+			}
+			dir, err := awsDirectory()
+			if err != nil {
+				return shellProvider{}, "", err
+			}
+			if err := awsWaitReady(ctx, home, self, requested, dir); err != nil {
+				return shellProvider{}, "", err
+			}
+			provider, err = currentBackend(home, self, requested)
+			if err != nil {
+				return shellProvider{}, "", err
+			}
 		}
 		return provider, "explicit backend", nil
 	}
@@ -184,8 +210,21 @@ func selectProviderAtPressure(ctx context.Context, home, self string, required [
 		}
 		for _, provider := range list {
 			if provider.cfg.Kind != "local" && supports(provider.cfg, required) && provider.Ready(ctx) {
+				if isAWSWorker(provider.Name()) {
+					available, err := awsWorkerAvailable(provider.Name())
+					if err != nil {
+						return shellProvider{}, "", err
+					}
+					if !available {
+						awsRequestScale()
+						continue
+					}
+				}
 				return provider, reason, nil
 			}
+		}
+		if busy {
+			awsRequestWake()
 		}
 		if !supports(local.cfg, required) {
 			return shellProvider{}, "", errors.New("no ready backend supports the required capabilities")
@@ -298,6 +337,42 @@ func executeJob(home, self, start, backend string, includes, required []string, 
 	provider, reason, err := selectProvider(context.Background(), home, self, backend, required)
 	if err != nil {
 		return fail(err)
+	}
+	if isAWSWorker(provider.Name()) {
+		dir, dirErr := awsDirectory()
+		if dirErr != nil {
+			return fail(dirErr)
+		}
+		lease, leaseErr := awsTryLease(dir, provider.Name())
+		if leaseErr != nil {
+			return fail(leaseErr)
+		}
+		if lease == nil {
+			awsRequestScale()
+			if backend != "auto" && !(os.Getenv("SWITCHYARD_TRACE_HANDOFF") == "1" && os.Getenv("SWITCHYARD_BACKEND") == "auto") {
+				return fail(errors.New("AWS worker is occupied; retry after the active job completes"))
+			}
+			provider, leaseErr = currentBackend(home, self, "local")
+			if leaseErr != nil {
+				return fail(leaseErr)
+			}
+			if leaseErr = initWorker(provider.cfg.Root); leaseErr != nil {
+				return fail(leaseErr)
+			}
+			reason = "AWS worker occupied; using local worker"
+		} else {
+			defer lease.Close()
+			if err := awsNoteWorkerUse(dir, provider.Name()); err != nil {
+				return fail(err)
+			}
+			// This runs before lease.Close, so idle reconciliation sees the new
+			// idle timestamp only after this dispatch has fully completed.
+			defer func() {
+				if err := awsNoteWorkerUse(dir, provider.Name()); err != nil {
+					fmt.Fprintln(os.Stderr, "switchyard: AWS worker activity could not be saved")
+				}
+			}()
+		}
 	}
 	if proxy && provider.Name() == "local" {
 		path, err := exec.LookPath(argv[0])
@@ -522,15 +597,19 @@ func printHelp() {
 	fmt.Println("  switchyard run [--backend auto|NAME] [--repo PATH] [--include PATH] [--require CAPABILITY] -- COMMAND ARGS...")
 	fmt.Println("  switchyard proxy [--backend auto|NAME] [--repo PATH] -- COMMAND ARGS...")
 	fmt.Println("  switchyard jobs                    list local run IDs and unapplied patches")
+	fmt.Println("  switchyard stats [--limit N]       recent command timing samples by backend")
 	fmt.Println("  switchyard status|logs|cancel JOB_ID")
 	fmt.Println("  switchyard hook [--] TOOL ARGS...   (managed PATH shims)")
 	fmt.Println("  switchyard hook --shell --resolved PATH -- TOOL ARGS...   (patched Bash external command hook)")
 	fmt.Println("  switchyard trace install           (private Linux x86-64 Bash launch link)")
 	fmt.Println("  switchyard trace shell -- -c COMMAND   (opt-in exec-filtered Bash supervisor)")
 	fmt.Println("  switchyard image build|status       (pinned Node image in the selected Linux runtime)")
+	fmt.Println("  switchyard aws auth select PROFILE [--role ROLE] | auth status")
 	fmt.Println("  switchyard aws up|status|setup|down|destroy [--source PATH]")
+	fmt.Println("  switchyard aws auto enable --source ABSOLUTE_PATH [--max-workers 1..4]")
+	fmt.Println("  switchyard aws auto status|tick|disable")
 	fmt.Println("  switchyard container status|stop [--cwd PATH]   (opt-in CWD sandbox)")
-	fmt.Println("  switchyard worker --root PATH init|ready|prepare|execute|status|logs|patch|cancel")
+	fmt.Println("  switchyard worker --root PATH init|ready|load|prepare|execute|status|logs|patch|cancel")
 }
 
 func Main(args []string) int {
@@ -546,7 +625,7 @@ func Main(args []string) int {
 	if err != nil {
 		return fail(err)
 	}
-	if os.Getenv("MESH_TRACE_HANDOFF") == "1" && filepath.IsAbs(os.Args[0]) {
+	if os.Getenv("SWITCHYARD_TRACE_HANDOFF") == "1" && filepath.IsAbs(os.Args[0]) {
 		invoked, invokedErr := os.Stat(os.Args[0])
 		executable, executableErr := os.Stat(self)
 		if invokedErr != nil || executableErr != nil {
@@ -559,10 +638,10 @@ func Main(args []string) int {
 	if tool := filepath.Base(os.Args[0]); hookTools[tool] {
 		return runHook(home, self, append([]string{tool}, args...))
 	}
-	if filepath.Base(os.Args[0]) == "bash" && os.Getenv("MESH_TRACE_SHELL") == "1" {
+	if filepath.Base(os.Args[0]) == "bash" && os.Getenv("SWITCHYARD_TRACE_SHELL") == "1" {
 		return traceShell(self, args)
 	}
-	if name := filepath.Base(os.Args[0]); name == "meshell" || name == "mesh-shell" {
+	if filepath.Base(os.Args[0]) == "switchyard-shell" {
 		return runShell(home, self, args)
 	}
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" {
@@ -570,6 +649,23 @@ func Main(args []string) int {
 		return 0
 	}
 	switch args[0] {
+	case "stats":
+		flags := flag.NewFlagSet("stats", flag.ContinueOnError)
+		limit := flags.Int("limit", 10, "maximum number of recent command signatures (1-50)")
+		if err := flags.Parse(args[1:]); err != nil {
+			return 2
+		}
+		if len(flags.Args()) != 0 || *limit < 1 || *limit > 50 {
+			return fail(errors.New("stats accepts only --limit 1..50"))
+		}
+		list, err := providers(home, self)
+		if err != nil {
+			return fail(err)
+		}
+		if err := writeStatistics(home, list, os.Stdout, *limit); err != nil {
+			return fail(err)
+		}
+		return 0
 	case "jobs":
 		if len(args) != 1 {
 			return fail(errors.New("jobs takes no arguments"))

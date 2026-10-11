@@ -1,8 +1,9 @@
-package mesh
+package switchyard
 
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,18 +28,19 @@ type Provider interface {
 }
 
 type backendConfig struct {
-	Name         string   `json:"name"`
-	Kind         string   `json:"kind"`
-	Root         string   `json:"root"`
-	Host         string   `json:"host,omitempty"`
-	User         string   `json:"user,omitempty"`
-	Port         int      `json:"port,omitempty"`
-	Identity     string   `json:"identity,omitempty"`
-	KnownHosts   string   `json:"known_hosts,omitempty"`
-	HostKeyAlias string   `json:"host_key_alias,omitempty"`
-	Command      string   `json:"command,omitempty"`
-	Priority     int      `json:"priority,omitempty"`
-	Capabilities []string `json:"capabilities,omitempty"`
+	Name          string   `json:"name"`
+	Kind          string   `json:"kind"`
+	Root          string   `json:"root"`
+	Host          string   `json:"host,omitempty"`
+	User          string   `json:"user,omitempty"`
+	Port          int      `json:"port,omitempty"`
+	Identity      string   `json:"identity,omitempty"`
+	KnownHosts    string   `json:"known_hosts,omitempty"`
+	HostKeyAlias  string   `json:"host_key_alias,omitempty"`
+	ObservationID string   `json:"observation_id,omitempty"`
+	Command       string   `json:"command,omitempty"`
+	Priority      int      `json:"priority,omitempty"`
+	Capabilities  []string `json:"capabilities,omitempty"`
 }
 
 type backendFile struct {
@@ -46,6 +48,14 @@ type backendFile struct {
 }
 
 func validateBackend(cfg backendConfig) error {
+	if cfg.ObservationID != "" {
+		if len(cfg.ObservationID) != 31 || cfg.ObservationID[0] != 'p' {
+			return errors.New("invalid managed observation identity")
+		}
+		if _, err := hex.DecodeString(cfg.ObservationID[1:]); err != nil {
+			return errors.New("invalid managed observation identity")
+		}
+	}
 	if !remoteName.MatchString(cfg.Name) || strings.Contains(cfg.Name, ".") {
 		return errors.New("backend name must use letters, numbers or hyphens")
 	}
@@ -127,6 +137,45 @@ func loadBackends(home string) ([]backendConfig, error) {
 	return data.Backends, nil
 }
 
+// A destroyed managed worker has no SSH key or known-hosts file. Drop only the
+// matching managed backend without validating the now-absent key material.
+func removeDestroyedAWSBackend(home, dir string) error {
+	path := configFile(home)
+	content, err := privateRead(path, 1<<20)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return errors.New("backend configuration is invalid")
+	}
+	var data backendFile
+	if err := json.Unmarshal(content, &data); err != nil {
+		return errors.New("backend configuration is invalid")
+	}
+	remaining := make([]backendConfig, 0, len(data.Backends))
+	removed := false
+	name := awsBackendName(dir)
+	for _, cfg := range data.Backends {
+		if cfg.Name != name {
+			remaining = append(remaining, cfg)
+			continue
+		}
+		if removed || cfg.Kind != "ssh" || cfg.Root != awsRoot || cfg.Command != awsCommand ||
+			cfg.Identity != awsKeyPath(dir) || cfg.KnownHosts != awsKnownPath(dir) || cfg.HostKeyAlias != awsName {
+			return errors.New("managed AWS backend does not match the tracked worker")
+		}
+		removed = true
+	}
+	if !removed {
+		return nil
+	}
+	content, err = json.MarshalIndent(backendFile{Backends: remaining}, "", "  ")
+	if err != nil {
+		return errors.New("could not update backend configuration")
+	}
+	return writeAtomic(path, append(content, '\n'))
+}
+
 func saveBackend(home string, cfg backendConfig) error {
 	if err := validateBackend(cfg); err != nil {
 		return err
@@ -155,7 +204,7 @@ func saveBackend(home string, cfg backendConfig) error {
 }
 
 func upsertAWSBackend(home string, cfg backendConfig) error {
-	if cfg.Name != "aws" {
+	if cfg.Name != "aws" && cfg.Name != "aws-2" && cfg.Name != "aws-3" && cfg.Name != "aws-4" {
 		return errors.New("invalid managed backend name")
 	}
 	if err := validateBackend(cfg); err != nil {
@@ -172,6 +221,13 @@ func upsertAWSBackend(home string, cfg backendConfig) error {
 		}
 		if entry.Kind != "ssh" || entry.HostKeyAlias != cfg.HostKeyAlias || entry.Identity != cfg.Identity || entry.KnownHosts != cfg.KnownHosts {
 			return errors.New("aws backend name belongs to an unrelated worker")
+		}
+		// The same pinned instance can get a new public address after a stop.
+		// Keep legacy measurements bound to that instance across the change.
+		if entry.ObservationID == "" {
+			cfg.ObservationID = observedBackendID(shellProvider{cfg: entry})
+		} else {
+			cfg.ObservationID = entry.ObservationID
 		}
 		entries[index], replaced = cfg, true
 	}

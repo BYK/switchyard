@@ -1,4 +1,4 @@
-package mesh
+package switchyard
 
 import (
 	"bytes"
@@ -18,7 +18,7 @@ import (
 	"time"
 )
 
-const workerMarker = "compute-mesh-go-worker-v1\n"
+const workerMarker = "switchyard-worker-v1\n"
 
 type jobRecord struct {
 	ID              string `json:"id"`
@@ -51,7 +51,7 @@ func workerReady(root string) error {
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 || info.Sys().(*syscall.Stat_t).Uid != uint32(os.Getuid()) {
 		return errors.New("worker root is not initialized")
 	}
-	marker, err := privateRead(filepath.Join(root, ".compute-mesh-worker"), 100)
+	marker, err := privateRead(filepath.Join(root, ".switchyard-worker"), 100)
 	if err != nil || string(marker) != workerMarker {
 		return errors.New("worker root has no ownership marker")
 	}
@@ -66,7 +66,7 @@ func initWorker(root string) error {
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return errors.New("worker root must be a private directory")
 		}
-		if _, markerErr := os.Lstat(filepath.Join(root, ".compute-mesh-worker")); os.IsNotExist(markerErr) {
+		if _, markerErr := os.Lstat(filepath.Join(root, ".switchyard-worker")); os.IsNotExist(markerErr) {
 			entries, err := os.ReadDir(root)
 			if err != nil || len(entries) > 0 {
 				return errors.New("worker root already contains unrelated files")
@@ -80,7 +80,7 @@ func initWorker(root string) error {
 	if err := privateTree(root); err != nil {
 		return err
 	}
-	if err := writeAtomic(filepath.Join(root, ".compute-mesh-worker"), []byte(workerMarker)); err != nil {
+	if err := writeAtomic(filepath.Join(root, ".switchyard-worker"), []byte(workerMarker)); err != nil {
 		return err
 	}
 	return privateTree(filepath.Join(root, "projects"))
@@ -331,6 +331,69 @@ func workerStatus(root, project, job string) (jobRecord, error) {
 	return record, nil
 }
 
+// A prepared job has no job.json until execution starts. Treat it as occupied,
+// and fail closed on invalid metadata: an idle stop must never interrupt work.
+func workerLoad(root string) (int, error) {
+	if err := workerReady(root); err != nil {
+		return 0, err
+	}
+	projects, err := os.ReadDir(filepath.Join(root, "projects"))
+	if err != nil || len(projects) > 4096 {
+		return 0, errors.New("could not inspect worker projects")
+	}
+	active, inspected := 0, 0
+	for _, project := range projects {
+		if !project.IsDir() || requireID(project.Name()) != nil {
+			return 0, errors.New("invalid worker project")
+		}
+		jobs, err := os.ReadDir(filepath.Join(root, "projects", project.Name(), "jobs"))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return 0, errors.New("could not inspect worker jobs")
+		}
+		inspected += len(jobs)
+		if inspected > 4096 {
+			return 0, errors.New("too many worker jobs to inspect")
+		}
+		for _, job := range jobs {
+			if !job.IsDir() || requireID(job.Name()) != nil {
+				return 0, errors.New("invalid worker job")
+			}
+			path := filepath.Join(root, "projects", project.Name(), "jobs", job.Name(), "job.json")
+			if _, err := os.Lstat(path); os.IsNotExist(err) {
+				active++
+				continue
+			} else if err != nil {
+				return 0, errors.New("could not inspect worker job")
+			}
+			record, err := workerStatus(root, project.Name(), job.Name())
+			if err != nil {
+				return 0, err
+			}
+			switch record.State {
+			case "finished", "setup-failed", "lost":
+				// The controller still retrieves logs and the patch after a
+				// process exits. Keep a recent result available through that
+				// transfer, including when the controller process crashes.
+				info, err := os.Lstat(path)
+				if err != nil || !info.Mode().IsRegular() {
+					return 0, errors.New("invalid worker job metadata")
+				}
+				if time.Since(info.ModTime()) < awsIdleWindow {
+					active++
+				}
+			case "starting", "running":
+				active++
+			default:
+				return 0, errors.New("unknown worker job state")
+			}
+		}
+	}
+	return active, nil
+}
+
 func workerCancel(root, project, job string) (jobRecord, error) {
 	record, err := workerStatus(root, project, job)
 	if err != nil || record.State != "running" {
@@ -466,7 +529,7 @@ cd "$4" || exit 2
 : > "$3" || exit 2
 shift 4
 exec "$@"`
-	params := append([]string{"-c", script, "mesh-node-setup", root, manager, marker, target}, argv...)
+	params := append([]string{"-c", script, "switchyard-node-setup", root, manager, marker, target}, argv...)
 	return exec.Command("/bin/sh", params...), true, nil
 }
 
@@ -851,6 +914,12 @@ func runWorker(root, action, project, job, snapshot, cwd string, argv, environme
 		return 0, initWorker(root)
 	case "ready":
 		return 0, workerReady(root)
+	case "load":
+		active, err := workerLoad(root)
+		if err == nil {
+			fmt.Println(active)
+		}
+		return 0, err
 	case "prepare":
 		return 0, workerPrepare(root, project, job)
 	case "execute":

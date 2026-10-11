@@ -1,4 +1,4 @@
-package mesh
+package switchyard
 
 import (
 	"crypto/sha256"
@@ -21,7 +21,7 @@ var containerImagePattern = regexp.MustCompile(`^[a-zA-Z0-9._:/-]+@sha256:[a-f0-
 
 func containerName(cwd string) string {
 	identity := sha256.Sum256([]byte(strconv.Itoa(os.Getuid()) + "\x00" + cwd))
-	return "mesh-cwd-" + hex.EncodeToString(identity[:12])
+	return "switchyard-cwd-" + hex.EncodeToString(identity[:12])
 }
 
 type containerProfile struct {
@@ -102,18 +102,18 @@ func containerSettings(path string) (containerProfile, error) {
 	if err != nil {
 		return containerProfile{}, err
 	}
-	image := os.Getenv("MESH_CONTAINER_IMAGE")
+	image := os.Getenv("SWITCHYARD_CONTAINER_IMAGE")
 	if !containerImagePattern.MatchString(image) && !validImageID(image) {
-		return containerProfile{}, errors.New("MESH_CONTAINER_IMAGE must pin an image digest or full image ID")
+		return containerProfile{}, errors.New("SWITCHYARD_CONTAINER_IMAGE must pin an image digest or full image ID")
 	}
-	network := os.Getenv("MESH_CONTAINER_NETWORK")
+	network := os.Getenv("SWITCHYARD_CONTAINER_NETWORK")
 	if network == "" {
 		network = "none"
 	}
 	if network != "none" && network != "bridge" {
-		return containerProfile{}, errors.New("MESH_CONTAINER_NETWORK must be none or bridge")
+		return containerProfile{}, errors.New("SWITCHYARD_CONTAINER_NETWORK must be none or bridge")
 	}
-	platform := os.Getenv("MESH_CONTAINER_PLATFORM")
+	platform := os.Getenv("SWITCHYARD_CONTAINER_PLATFORM")
 	if platform == "" {
 		platform = "linux/" + runtime.GOARCH
 	}
@@ -141,12 +141,12 @@ func containerSettings(path string) (containerProfile, error) {
 
 func containerLabels(profile containerProfile) []string {
 	return []string{
-		"--label", "mesh.cwd=" + profile.cwd,
-		"--label", "mesh.image=" + profile.image,
-		"--label", "mesh.owner=" + strconv.Itoa(os.Getuid()),
-		"--label", "mesh.network=" + profile.network,
-		"--label", "mesh.platform=" + profile.platform,
-		"--label", "mesh.runtime=" + profile.runtime,
+		"--label", "switchyard.cwd=" + profile.cwd,
+		"--label", "switchyard.image=" + profile.image,
+		"--label", "switchyard.owner=" + strconv.Itoa(os.Getuid()),
+		"--label", "switchyard.network=" + profile.network,
+		"--label", "switchyard.platform=" + profile.platform,
+		"--label", "switchyard.runtime=" + profile.runtime,
 	}
 }
 
@@ -194,10 +194,10 @@ func inspectContainer(engine, name string) (map[string]string, bool, string, boo
 }
 
 func verifyContainer(profile containerProfile, labels map[string]string, imageID string) error {
-	if labels["mesh.cwd"] != profile.cwd || labels["mesh.image"] != profile.image ||
-		labels["mesh.owner"] != strconv.Itoa(os.Getuid()) || labels["mesh.network"] != profile.network ||
-		labels["mesh.platform"] != profile.platform || imageID != profile.imageID ||
-		labels["mesh.runtime"] != profile.runtime && !(profile.runtime == "docker" && labels["mesh.runtime"] == "") {
+	if labels["switchyard.cwd"] != profile.cwd || labels["switchyard.image"] != profile.image ||
+		labels["switchyard.owner"] != strconv.Itoa(os.Getuid()) || labels["switchyard.network"] != profile.network ||
+		labels["switchyard.platform"] != profile.platform || imageID != profile.imageID ||
+		labels["switchyard.runtime"] != profile.runtime && !(profile.runtime == "docker" && labels["switchyard.runtime"] == "") {
 		return errors.New("CWD sandbox exists with a different image or settings; stop it explicitly before changing profiles")
 	}
 	return nil
@@ -251,7 +251,7 @@ func startSharedContainer(profile containerProfile, home string) error {
 	}
 	if !exists {
 		options := append([]string{"create", "--name", profile.name, "--init"}, containerBase(profile)...)
-		options = append(options, "--mount", "type=bind,source="+containerHome+",target=/home/mesh",
+		options = append(options, "--mount", "type=bind,source="+containerHome+",target=/home/switchyard",
 			profile.image, "/bin/sh", "-c", "exec tail -f /dev/null")
 		if _, createErr := containerOutput(profile.runtime, options...); createErr != nil {
 			// Another invocation may have created the same CWD container.
@@ -301,8 +301,8 @@ func sharedContainerRuntime(home, name string) (string, error) {
 
 func containerEnvironment(profile containerProfile) ([]string, []string, error) {
 	environment := append([]string{}, os.Environ()...)
-	environment = append(environment, "HOME=/home/mesh", "PWD="+profile.cwd,
-		"MESH_CONTAINER_SESSION="+profile.name)
+	environment = append(environment, "HOME=/home/switchyard", "PWD="+profile.cwd,
+		"SWITCHYARD_CONTAINER_SESSION="+profile.name)
 	values := make(map[string]string, len(environment))
 	for _, entry := range environment {
 		name, value, ok := strings.Cut(entry, "=")
@@ -315,9 +315,9 @@ func containerEnvironment(profile containerProfile) ([]string, []string, error) 
 	}
 	values["PATH"] = "/usr/local/bin:/usr/bin:/bin"
 	values["TMPDIR"] = "/tmp"
-	values["XDG_CACHE_HOME"] = "/home/mesh/.cache"
-	values["XDG_CONFIG_HOME"] = "/home/mesh/.config"
-	values["XDG_DATA_HOME"] = "/home/mesh/.local/share"
+	values["XDG_CACHE_HOME"] = "/home/switchyard/.cache"
+	values["XDG_CONFIG_HOME"] = "/home/switchyard/.config"
+	values["XDG_DATA_HOME"] = "/home/switchyard/.local/share"
 	names := make([]string, 0, len(values))
 	for name := range values {
 		names = append(names, name)
@@ -331,12 +331,12 @@ func containerEnvironment(profile containerProfile) ([]string, []string, error) 
 }
 
 func runContainerShell(home string, args []string) int {
-	mode := os.Getenv("MESH_CONTAINER_MODE")
+	mode := os.Getenv("SWITCHYARD_CONTAINER_MODE")
 	if mode == "" {
 		mode = "shared"
 	}
 	if mode != "shared" && mode != "isolated" {
-		return fail(errors.New("MESH_CONTAINER_MODE must be shared or isolated"))
+		return fail(errors.New("SWITCHYARD_CONTAINER_MODE must be shared or isolated"))
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -358,7 +358,7 @@ func runContainerShell(home string, args []string) int {
 		runtimeArgs = []string{"exec", "--interactive", "--workdir", profile.cwd}
 	} else {
 		runtimeArgs = append([]string{"run", "--rm", "--init", "--interactive"}, containerBase(profile)...)
-		runtimeArgs = append(runtimeArgs, "--tmpfs", "/home/mesh:rw,nosuid,size=256m")
+		runtimeArgs = append(runtimeArgs, "--tmpfs", "/home/switchyard:rw,nosuid,size=256m")
 	}
 	if isTTY(os.Stdin) && isTTY(os.Stdout) {
 		runtimeArgs = append(runtimeArgs, "--tty")
@@ -448,7 +448,7 @@ func controlSharedContainer(home, action, canonical, name string) error {
 		fmt.Println("No shared CWD sandbox")
 		return nil
 	}
-	if labels["mesh.cwd"] != canonical || labels["mesh.owner"] != strconv.Itoa(os.Getuid()) {
+	if labels["switchyard.cwd"] != canonical || labels["switchyard.owner"] != strconv.Itoa(os.Getuid()) {
 		return errors.New("CWD sandbox identity does not match its container")
 	}
 	if action == "status" {

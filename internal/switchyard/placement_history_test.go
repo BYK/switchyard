@@ -1,6 +1,7 @@
-package mesh
+package switchyard
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,6 +66,50 @@ func TestPlacementLearnsExactCommandAndDirectoryWithoutStoringArguments(t *testi
 	}
 }
 
+func TestStatisticsUsePrivateObservationsWithoutDisplayingCommands(t *testing.T) {
+	home := t.TempDir()
+	var output bytes.Buffer
+	if err := writeStatistics(home, nil, &output, 10); err != nil || !strings.Contains(output.String(), "Commands observed: 0") {
+		t.Fatalf("empty statistics were not readable: %v %q", err, output.String())
+	}
+	secret := "secret-argument-sentinel"
+	project := t.TempDir()
+	key, ok := commandSignature(project, "/usr/bin/node", []string{"--token=" + secret})
+	if !ok {
+		t.Fatal("valid command was not identified")
+	}
+	provider := shellProvider{cfg: backendConfig{Name: "aws", Kind: "ssh", Root: "/private/worker", Host: "example.invalid", Identity: "/private/key"}}
+	remote := observedBackendID(provider)
+	for _, duration := range []time.Duration{10 * time.Second, 12 * time.Second} {
+		if err := recordCommandObservation(home, key, "local", duration, time.Second); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, duration := range []time.Duration{2 * time.Second, 4 * time.Second} {
+		if err := recordCommandObservation(home, key, remote, duration, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	output.Reset()
+	if err := writeStatistics(home, []shellProvider{provider}, &output, 10); err != nil {
+		t.Fatal(err)
+	}
+	text := output.String()
+	if !strings.Contains(text, key[:12]) || !strings.Contains(text, "Commands observed: 1") || !strings.Contains(text, "local") || !strings.Contains(text, "aws") || !strings.Contains(text, "11000") || !strings.Contains(text, "3000") {
+		t.Fatalf("statistics omitted the recorded samples: %s", text)
+	}
+	if strings.Contains(text, secret) || strings.Contains(text, project) || strings.Contains(text, "/private/key") {
+		t.Fatal("statistics disclosed an argument, directory or backend identity")
+	}
+	if err := os.Chmod(observationFile(home), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	if err := writeStatistics(home, nil, &output, 10); err == nil || output.Len() != 0 {
+		t.Fatal("statistics read an untrusted observation file")
+	}
+}
+
 func TestPlacementDoesNotRouteWhenRemoteIsSlower(t *testing.T) {
 	home := t.TempDir()
 	key, ok := commandSignature(t.TempDir(), "/bin/true", nil)
@@ -100,5 +145,29 @@ func TestPlacementRequiresMeasuredMargin(t *testing.T) {
 	}
 	if backend := preferredObservedBackend(home, key, []string{"aws"}); backend != "" {
 		t.Fatalf("noise-scale speedup was treated as a gain: %q", backend)
+	}
+}
+
+func TestObservationRejectsRoundedValuesThatWouldPoisonHistory(t *testing.T) {
+	home := t.TempDir()
+	key, ok := commandSignature(t.TempDir(), "/bin/true", nil)
+	if !ok {
+		t.Fatal("valid command was rejected")
+	}
+	// These durations pass a nanosecond comparison, but truncation to whole
+	// milliseconds makes the stored CPU time exceed 256 times the wall time.
+	if err := recordCommandObservation(home, key, "local", 3*time.Millisecond+10*time.Microsecond, 770*time.Millisecond); err == nil {
+		t.Fatal("observation stored CPU and wall values that cannot be read back")
+	}
+	history, err := readObservations(home)
+	if err != nil || len(history) != 0 {
+		t.Fatalf("rejected observation corrupted history: %v", err)
+	}
+	if err := recordCommandObservation(home, key, "local", 12*time.Hour, time.Second); err != nil {
+		t.Fatalf("long valid duration was rejected: %v", err)
+	}
+	history, err = readObservations(home)
+	if err != nil || len(history[key].Backends["local"]) != 1 {
+		t.Fatalf("long observation could not be read back: %v", err)
 	}
 }

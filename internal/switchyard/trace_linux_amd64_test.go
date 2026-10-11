@@ -1,4 +1,4 @@
-package mesh
+package switchyard
 
 import (
 	"os"
@@ -11,11 +11,30 @@ import (
 	"time"
 )
 
+func TestTraceShellLeavesUnpreviewedCommandsUntraced(t *testing.T) {
+	exe := binary(t)
+	// An ordinary tool call must not install an inherited seccomp filter or
+	// attach ptrace to its descendants just to learn local timings. Nested
+	// debuggers and test tracers need to remain usable.
+	script := `while IFS=: read -r label value; do
+  if [ "$label" = TracerPid ]; then
+    [ "$value" -eq 0 ]
+    exit
+  fi
+done < /proc/self/status
+exit 99`
+	cmd := exec.Command(exe, "trace", "shell", "--", "-c", script)
+	cmd.Env = append(os.Environ(), "SWITCHYARD_BACKEND=auto", "SWITCHYARD_TRACE_PREVIEWED=")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("unpreviewed command was traced: %v %q", err, output)
+	}
+}
+
 func TestTraceShellRoutesOneExecAndPreservesLocalCommands(t *testing.T) {
 	root := fixture(t)
 	home := t.TempDir()
 	exe := binary(t)
-	if installed := os.Getenv("MESH_TEST_INSTALLED_TRACE"); installed != "" {
+	if installed := os.Getenv("SWITCHYARD_TEST_INSTALLED_TRACE"); installed != "" {
 		exe = installed
 	}
 	worker := filepath.Join(t.TempDir(), "worker")
@@ -31,14 +50,14 @@ func TestTraceShellRoutesOneExecAndPreservesLocalCommands(t *testing.T) {
 		}
 	}
 	tool := filepath.Join(t.TempDir(), "pnpm")
-	if err := os.WriteFile(tool, []byte("#!/bin/sh\nif [ \"$1\" = install ]; then mkdir node_modules; exit 0; fi\nif [ \"$1\" = --version ]; then exit 19; fi\ntest -d node_modules || exit 91\nprintf 'worker stdout\\n'\nprintf 'worker stderr\\n' >&2\nprintf '%s\\n' \"$MESH_TRACE_INVOCATION\" \"$2\" > agent-note.txt\ncat >> agent-note.txt\nexit 37\n"), 0o700); err != nil {
+	if err := os.WriteFile(tool, []byte("#!/bin/sh\nif [ \"$1\" = install ]; then mkdir node_modules; exit 0; fi\nif [ \"$1\" = --version ]; then\n  if [ \"$SWITCHYARD_TEST_REEXEC\" = 1 ] && [ \"$SWITCHYARD_TEST_CHILD\" != 1 ]; then SWITCHYARD_TEST_CHILD=1 \"$0\" \"$@\"; exit $?; fi\n  exit 19\nfi\ntest -d node_modules || exit 91\nprintf 'worker stdout\\n'\nprintf 'worker stderr\\n' >&2\nprintf '%s\\n' \"$SWITCHYARD_TRACE_INVOCATION\" \"$2\" > agent-note.txt\ncat >> agent-note.txt\nexit 37\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Dir(tool) + ":" + os.Getenv("PATH")
 	checkPreview := func() {
 		t.Helper()
 		cmd := exec.Command(exe, "preview", "--repo", root)
-		cmd.Env = append(os.Environ(), "MESH_GO_HOME="+home, "PATH="+path)
+		cmd.Env = append(os.Environ(), "SWITCHYARD_HOME="+home, "PATH="+path)
 		preview, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("preview failed: %v", err)
@@ -48,12 +67,12 @@ func TestTraceShellRoutesOneExecAndPreservesLocalCommands(t *testing.T) {
 			t.Fatalf("preview changed its selected or excluded paths: %s", preview)
 		}
 	}
-	run := func(backend, script, stdin string) (int, string, string) {
+	run := func(backend, script, stdin string, extraEnv ...string) (int, string, string) {
 		t.Helper()
 		checkPreview()
 		cmd := exec.Command(exe, "trace", "shell", "--", "-c", script)
 		cmd.Dir = root
-		cmd.Env = append(os.Environ(), "MESH_GO_HOME="+home, "MESH_BACKEND="+backend, "PATH="+path, "MESH_TRACE_INVOCATION=late value")
+		cmd.Env = append(append(os.Environ(), "SWITCHYARD_HOME="+home, "SWITCHYARD_BACKEND="+backend, "PATH="+path, "SWITCHYARD_TRACE_INVOCATION=late value"), extraEnv...)
 		cmd.Stdin = strings.NewReader(stdin)
 		var stdout, stderr strings.Builder
 		cmd.Stdout, cmd.Stderr = &stdout, &stderr
@@ -67,7 +86,7 @@ func TestTraceShellRoutesOneExecAndPreservesLocalCommands(t *testing.T) {
 		t.Fatalf("traced shell could not start: %v", err)
 		return 2, "", ""
 	}
-	status, stdout, stderr := run("sandbox", "MESH_TRACE_PREVIEWED=1 pnpm test 'quoted value'", "trace stdin")
+	status, stdout, stderr := run("sandbox", "SWITCHYARD_TRACE_PREVIEWED=1 pnpm test 'quoted value'", "trace stdin")
 	if status != 37 || !strings.Contains(stdout, "worker stdout\n") || !strings.Contains(stderr, "worker stderr\n") {
 		t.Fatalf("exec was not routed with its status and streams: %d %q %q", status, stdout, stderr)
 	}
@@ -82,7 +101,21 @@ func TestTraceShellRoutesOneExecAndPreservesLocalCommands(t *testing.T) {
 	if err != nil || !strings.Contains(string(patch), "+late value") || !strings.Contains(string(patch), "+quoted value") || !strings.Contains(string(patch), "+trace stdin") || strings.Contains(string(patch), ".env") {
 		t.Fatalf("unexpected unapplied patch: %v", err)
 	}
-	status, _, _ = run("auto", "pnpm --version", "")
+	// Bash must remain alive to run an EXIT trap, so it forks even this single
+	// foreground command. The routed child must keep Bash's trap and exit status.
+	bashEnv := filepath.Join(t.TempDir(), "bash-env")
+	if err := os.WriteFile(bashEnv, []byte("trap 'printf \"shell-exit-trap\\n\"' EXIT\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	status, stdout, stderr = run("sandbox", "SWITCHYARD_TRACE_PREVIEWED=1 pnpm test 'quoted value'", "traced child stdin", "BASH_ENV="+bashEnv)
+	if status != 37 || !strings.Contains(stdout, "worker stdout\n") || !strings.Contains(stdout, "shell-exit-trap\n") || !strings.Contains(stderr, "worker stderr\n") {
+		t.Fatalf("foreground Bash child was not routed while preserving the EXIT trap: %d %q %q", status, stdout, stderr)
+	}
+	patches, err = filepath.Glob(filepath.Join(home, "runs", "*.patch"))
+	if err != nil || len(patches) != 2 {
+		t.Fatalf("foreground child did not produce an isolated patch: %v %v", patches, err)
+	}
+	status, _, _ = run("auto", "SWITCHYARD_TRACE_PREVIEWED=1 pnpm --version", "")
 	if status != 19 {
 		t.Fatalf("unpreviewed automatic command was redirected: %d", status)
 	}
@@ -94,11 +127,27 @@ func TestTraceShellRoutesOneExecAndPreservesLocalCommands(t *testing.T) {
 	if err != nil || len(history[key].Backends["local"]) == 0 {
 		t.Fatalf("traced local command timing was not learned: %v", err)
 	}
+	status, stdout, _ = run("auto", "SWITCHYARD_TRACE_PREVIEWED=1 pnpm --version", "", "BASH_ENV="+bashEnv)
+	if status != 19 || !strings.Contains(stdout, "shell-exit-trap\n") {
+		t.Fatalf("foreground local command did not preserve Bash's exit trap: %d %q", status, stdout)
+	}
+	history, err = readObservations(home)
+	if err != nil || len(history[key].Backends["local"]) != 2 {
+		t.Fatalf("forked local command timing was not learned: %v", err)
+	}
+	status, _, _ = run("auto", "SWITCHYARD_TRACE_PREVIEWED=1 pnpm --version", "", "SWITCHYARD_TEST_REEXEC=1")
+	if status != 19 {
+		t.Fatalf("a tool launching another executable changed its exit status: %d", status)
+	}
+	history, err = readObservations(home)
+	if err != nil || len(history[key].Backends["local"]) != 3 {
+		t.Fatalf("a single shell command produced more than one local timing sample: %v, %d", err, len(history[key].Backends["local"]))
+	}
 	status, _, _ = run("sandbox", "pnpm --version", "")
 	if status != 2 {
 		t.Fatalf("unpreviewed forced command did not fail closed: %d", status)
 	}
-	status, stdout, stderr = run("sandbox", "MESH_TRACE_PREVIEWED=1 python3 -c 'import sys; sys.exit(29)'", "")
+	status, stdout, stderr = run("sandbox", "SWITCHYARD_TRACE_PREVIEWED=1 python3 -c 'import sys; sys.exit(29)'", "")
 	if status != 29 {
 		t.Fatalf("an unlisted external command did not preserve its exit: %d %q %q", status, stdout, stderr)
 	}
@@ -115,7 +164,7 @@ func TestTraceShellRoutesOneExecAndPreservesLocalCommands(t *testing.T) {
 		t.Fatalf("eligible tool with redirection left Bash: %d", status)
 	}
 	patches, err = filepath.Glob(filepath.Join(home, "runs", "*.patch"))
-	if err != nil || len(patches) != 1 {
+	if err != nil || len(patches) != 2 {
 		t.Fatal("pipeline or redirection ran on the worker")
 	}
 	status, _, _ = run("sandbox", "pnpm test", "")
@@ -130,11 +179,11 @@ func TestTraceShellRoutesOneExecAndPreservesLocalCommands(t *testing.T) {
 	if status != 91 {
 		t.Fatalf("automatic local fallback intercepted itself: %d", status)
 	}
-	status, _, _ = run("sandbox", "MESH_TRACE_PREVIEWED=1 pnpm test | cat", "")
+	status, _, _ = run("sandbox", "SWITCHYARD_TRACE_PREVIEWED=1 pnpm test | cat", "")
 	if status != 0 {
 		t.Fatalf("preview marker caused a pipeline to offload: %d", status)
 	}
-	status, _, _ = run("sandbox", "MESH_TRACE_PREVIEWED=1 pnpm test > /dev/null", "")
+	status, _, _ = run("sandbox", "SWITCHYARD_TRACE_PREVIEWED=1 pnpm test > /dev/null", "")
 	if status != 91 {
 		t.Fatalf("preview marker caused a redirected command to offload: %d", status)
 	}
@@ -142,26 +191,38 @@ func TestTraceShellRoutesOneExecAndPreservesLocalCommands(t *testing.T) {
 	if status != 0 {
 		t.Fatalf("tool in a compound command was diverted from Bash: %d", status)
 	}
+	status, _, _ = run("sandbox", "SWITCHYARD_TRACE_PREVIEWED=1 pnpm test; printf done", "")
+	if status != 0 {
+		t.Fatalf("previewed compound command was diverted from Bash: %d", status)
+	}
+	status, _, _ = run("sandbox", "SWITCHYARD_TRACE_PREVIEWED=1 pnpm test; pnpm --version", "")
+	if status != 19 {
+		t.Fatalf("final eligible command in a compound script was diverted from Bash: %d", status)
+	}
 	patches, err = filepath.Glob(filepath.Join(home, "runs", "*.patch"))
-	if err != nil || len(patches) != 1 {
+	if err != nil || len(patches) != 2 {
 		t.Fatal("a command with different shell semantics ran on the worker")
 	}
 	alternate := filepath.Join(t.TempDir(), "pnpm")
 	if err := os.WriteFile(alternate, []byte("#!/bin/sh\nexit 19\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	mismatch := "hash -p " + alternate + " pnpm; MESH_TRACE_PREVIEWED=1 pnpm test"
-	status, _, _ = run("sandbox", mismatch, "")
-	if status != 2 {
-		t.Fatalf("forced backend ran a Bash-hashed executable other than Mesh's PATH result: %d", status)
+	hashEnv := filepath.Join(t.TempDir(), "bash-env")
+	if err := os.WriteFile(hashEnv, []byte("hash -p "+strconv.Quote(alternate)+" pnpm\ntrap ':' EXIT\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	status, _, _ = run("auto", mismatch, "")
+	mismatch := "SWITCHYARD_TRACE_PREVIEWED=1 pnpm test"
+	status, _, _ = run("sandbox", mismatch, "", "BASH_ENV="+hashEnv)
+	if status != 2 {
+		t.Fatalf("forced backend ran a Bash-hashed executable other than Switchyard's PATH result: %d", status)
+	}
+	status, _, _ = run("auto", mismatch, "", "BASH_ENV="+hashEnv)
 	if status != 19 {
 		t.Fatalf("automatic placement changed Bash's hashed executable: %d", status)
 	}
 }
 
-func TestTraceInstallMigratesOnlyThePrivateUnpublishedBinary(t *testing.T) {
+func TestTraceInstallRejectsForeignLinkAndRepeatsSafely(t *testing.T) {
 	home := t.TempDir()
 	bin := filepath.Join(home, "bin")
 	directory := filepath.Join(home, "ptrace", "bin")
@@ -171,17 +232,10 @@ func TestTraceInstallMigratesOnlyThePrivateUnpublishedBinary(t *testing.T) {
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	previous := filepath.Join(bin, "mesh-go")
 	current := filepath.Join(bin, "switchyard")
-	if err := os.WriteFile(previous, []byte("previous binary"), 0o700); err != nil {
-		t.Fatal(err)
-	}
 	link := filepath.Join(directory, "bash")
-	if err := os.Symlink(previous, link); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := installTraceShell(home, current); err != nil {
-		t.Fatalf("could not migrate the private traced-shell link: %v", err)
+		t.Fatalf("could not install the private traced-shell link: %v", err)
 	}
 	if target, err := os.Readlink(link); err != nil || target != current {
 		t.Fatalf("traced-shell link points to %q: %v", target, err)
@@ -204,7 +258,7 @@ func TestTraceShellNameSelectsTracerAndInteractivePassesThrough(t *testing.T) {
 	exe := binary(t)
 	home := t.TempDir()
 	install := exec.Command(exe, "trace", "install")
-	install.Env = append(os.Environ(), "MESH_GO_HOME="+home)
+	install.Env = append(os.Environ(), "SWITCHYARD_HOME="+home)
 	output, err := install.CombinedOutput()
 	if err != nil {
 		t.Fatalf("trace install failed: %v %q", err, output)
@@ -214,12 +268,12 @@ func TestTraceShellNameSelectsTracerAndInteractivePassesThrough(t *testing.T) {
 		t.Fatalf("trace install returned an unexpected shell: %q", shell)
 	}
 	cmd := exec.Command(shell, "-c", "printf 'shell tool'")
-	cmd.Env = append(os.Environ(), "MESH_TRACE_SHELL=1", "MESH_BACKEND=auto", "MESH_GO_HOME="+t.TempDir())
+	cmd.Env = append(os.Environ(), "SWITCHYARD_TRACE_SHELL=1", "SWITCHYARD_BACKEND=auto", "SWITCHYARD_HOME="+t.TempDir())
 	if output, err := cmd.CombinedOutput(); err != nil || string(output) != "shell tool" {
 		t.Fatalf("OpenCode-style shell did not start: %v %q", err, output)
 	}
 	cmd = exec.Command(shell, "-i", "-c", "printf 'terminal'")
-	cmd.Env = append(os.Environ(), "MESH_TRACE_SHELL=1", "MESH_BACKEND=auto", "MESH_GO_HOME="+t.TempDir())
+	cmd.Env = append(os.Environ(), "SWITCHYARD_TRACE_SHELL=1", "SWITCHYARD_BACKEND=auto", "SWITCHYARD_HOME="+t.TempDir())
 	output, err = cmd.CombinedOutput()
 	if err != nil || !strings.Contains(string(output), "terminal") {
 		t.Fatalf("interactive shell did not pass through to Bash: %v %q", err, output)
@@ -231,7 +285,7 @@ func TestTraceShellNameSelectsTracerAndInteractivePassesThrough(t *testing.T) {
 			t.Fatal(err)
 		}
 		terminal := exec.Command(script, "-q", "-e", "-c", shell+" -c 'pnpm --version'", "/dev/null")
-		terminal.Env = append(os.Environ(), "SHELL=/usr/bin/bash", "PATH="+bin+":"+os.Getenv("PATH"), "MESH_TRACE_SHELL=1", "MESH_BACKEND=sandbox", "MESH_GO_HOME="+home)
+		terminal.Env = append(os.Environ(), "SHELL=/usr/bin/bash", "PATH="+bin+":"+os.Getenv("PATH"), "SWITCHYARD_TRACE_SHELL=1", "SWITCHYARD_BACKEND=sandbox", "SWITCHYARD_HOME="+home)
 		if output, err := terminal.CombinedOutput(); err == nil || err.(*exec.ExitError).ExitCode() != 19 {
 			t.Fatalf("terminal -c was unexpectedly traced: %v %q", err, output)
 		}
@@ -262,7 +316,7 @@ func TestTraceShellReturnsWithoutKillingBackgroundCommands(t *testing.T) {
 	// filter must still have a tracer when that command next uses execve.
 	script := "(read line < " + input + "; /usr/bin/printf x > " + done + ") </dev/null >/dev/null 2>&1 &"
 	cmd := exec.Command(exe, "trace", "shell", "--", "-c", script)
-	cmd.Env = append(os.Environ(), "MESH_BACKEND=auto", "MESH_GO_HOME="+t.TempDir())
+	cmd.Env = append(os.Environ(), "SWITCHYARD_BACKEND=auto", "SWITCHYARD_HOME="+t.TempDir())
 	returned := make(chan error, 1)
 	go func() { returned <- cmd.Run() }()
 	select {
@@ -299,7 +353,7 @@ func TestTraceShellReturnsWithoutKillingBackgroundCommands(t *testing.T) {
 func TestTraceShellKilledWrapperReapsTracee(t *testing.T) {
 	exe := binary(t)
 	cmd := exec.Command(exe, "trace", "shell", "--", "-c", "printf '%s\\n' $$; exec /usr/bin/sleep 30")
-	cmd.Env = append(os.Environ(), "MESH_BACKEND=auto", "MESH_GO_HOME="+t.TempDir())
+	cmd.Env = append(os.Environ(), "SWITCHYARD_BACKEND=auto", "SWITCHYARD_HOME="+t.TempDir())
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -357,7 +411,7 @@ func TestTraceShellReturnsWhileStdinRemainsOpen(t *testing.T) {
 	defer input.Close()
 	defer writer.Close()
 	cmd := exec.Command(binary(t), "trace", "shell", "--", "-c", "/usr/bin/true")
-	cmd.Env = append(os.Environ(), "MESH_BACKEND=auto", "MESH_GO_HOME="+t.TempDir())
+	cmd.Env = append(os.Environ(), "SWITCHYARD_BACKEND=auto", "SWITCHYARD_HOME="+t.TempDir())
 	cmd.Stdin = input
 	complete := make(chan error, 1)
 	go func() { complete <- cmd.Run() }()

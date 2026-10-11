@@ -1,4 +1,4 @@
-package mesh
+package switchyard
 
 import (
 	binaryle "encoding/binary"
@@ -42,7 +42,7 @@ func traceCommand(home string, self string, args []string) int {
 	if len(args) > 0 && args[0] == "child" {
 		return traceChild(self, args[1:])
 	}
-	if len(args) > 0 && args[0] == "supervise" && os.Getenv("MESH_TRACE_SUPERVISOR") == "1" {
+	if len(args) > 0 && args[0] == "supervise" && os.Getenv("SWITCHYARD_TRACE_SUPERVISOR") == "1" {
 		return traceSupervisor(self, args[1:])
 	}
 	if len(args) >= 1 && args[0] == "shell" {
@@ -76,21 +76,7 @@ func installTraceShell(home string, self string) (string, error) {
 		if target == self {
 			return shell, nil
 		}
-		// Migrate only the private, unpublished CLI installed beside this binary.
-		old := filepath.Join(filepath.Dir(self), "mesh-go")
-		oldInfo, oldErr := os.Lstat(old)
-		if target != old || oldErr != nil || !oldInfo.Mode().IsRegular() || oldInfo.Mode().Perm()&0o111 == 0 {
-			return "", errors.New("traced shell path already points elsewhere")
-		}
-		replacement := filepath.Join(directory, "bash.switchyard-next")
-		if err := os.Symlink(self, replacement); err != nil {
-			return "", errors.New("could not prepare traced shell migration")
-		}
-		defer os.Remove(replacement)
-		if err := os.Rename(replacement, shell); err != nil {
-			return "", errors.New("could not migrate traced shell link")
-		}
-		return shell, nil
+		return "", errors.New("traced shell path already points elsewhere")
 	} else if !os.IsNotExist(err) {
 		return "", errors.New("could not inspect traced shell path")
 	}
@@ -101,7 +87,7 @@ func installTraceShell(home string, self string) (string, error) {
 }
 
 func traceChild(self string, args []string) int {
-	if os.Getenv("MESH_TRACE_CHILD") != "1" {
+	if os.Getenv("SWITCHYARD_TRACE_CHILD") != "1" {
 		return fail(errors.New("trace child requires a supervisor"))
 	}
 	runtime.LockOSThread()
@@ -141,7 +127,18 @@ func traceShell(self string, args []string) int {
 			commandString = true
 		}
 	}
-	if os.Getenv("MESH_BACKEND") == "local" || !commandString || isTTY(os.Stdin) {
+	backend := os.Getenv("SWITCHYARD_BACKEND")
+	previewed := os.Getenv("SWITCHYARD_TRACE_PREVIEWED") == "1"
+	// Seccomp filters persist into every descendant. An unpreviewed automatic
+	// command cannot offload, so tracing it would only add overhead and prevent
+	// descendants from starting their own ptrace supervisors.
+	mayOffload := previewed || backend != "" && backend != "auto" && backend != "local"
+	for _, arg := range args {
+		if strings.Contains(arg, "SWITCHYARD_TRACE_PREVIEWED=1") || strings.Contains(arg, "SWITCHYARD_BACKEND=") {
+			mayOffload = true
+		}
+	}
+	if backend == "local" || !commandString || isTTY(os.Stdin) || !mayOffload {
 		if err := syscall.Exec("/usr/bin/bash", append([]string{"bash"}, args...), os.Environ()); err != nil {
 			return fail(errors.New("could not run local Bash"))
 		}
@@ -156,7 +153,7 @@ func traceShell(self string, args []string) int {
 	command := exec.Command(self, append([]string{"trace", "supervise"}, args...)...)
 	command.Stdin, command.Stdout, command.Stderr = os.Stdin, os.Stdout, os.Stderr
 	command.ExtraFiles = []*os.File{writer}
-	command.Env = append(os.Environ(), "MESH_TRACE_SUPERVISOR=1")
+	command.Env = append(os.Environ(), "SWITCHYARD_TRACE_SUPERVISOR=1")
 	command.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGTERM}
 	if err := command.Start(); err != nil {
 		_ = reader.Close()
@@ -172,6 +169,89 @@ func traceShell(self string, args []string) int {
 		return fail(errors.New("exec supervisor did not report a valid command status"))
 	}
 	return int(binaryle.LittleEndian.Uint32(status[:]))
+}
+
+// Only a literal, single Bash command can be handed off from a forked child.
+// Bash keeps its parent alive for EXIT traps and other shell state. Reject all
+// expansion, globbing and shell control syntax rather than guessing whether an
+// exec in a child belongs to a pipeline, substitution or compound command.
+func traceStandaloneCommand(args []string) []string {
+	var script string
+	for index, arg := range args {
+		if arg != "-c" {
+			continue
+		}
+		if script != "" || index+2 != len(args) {
+			return nil
+		}
+		script = args[index+1]
+	}
+	if len(script) == 0 || len(script) > 64<<10 {
+		return nil
+	}
+	words := make([]string, 0, 8)
+	var word strings.Builder
+	quote := byte(0)
+	inWord := false
+	for index := 0; index < len(script); index++ {
+		char := script[index]
+		if char < ' ' && char != '\t' || strings.ContainsRune(";|&<>(){}$`\\\r\n#*?[]~!", rune(char)) {
+			return nil
+		}
+		if char == '\'' || char == '"' {
+			if quote == 0 {
+				quote = char
+				inWord = true
+				continue
+			}
+			if quote == char {
+				quote = 0
+				continue
+			}
+		}
+		if (char == ' ' || char == '\t') && quote == 0 {
+			if inWord {
+				words = append(words, word.String())
+				word.Reset()
+				inWord = false
+			}
+			continue
+		}
+		inWord = true
+		word.WriteByte(char)
+	}
+	if quote != 0 {
+		return nil
+	}
+	if inWord {
+		words = append(words, word.String())
+	}
+	for len(words) > 0 {
+		name, _, assignment := strings.Cut(words[0], "=")
+		if !assignment || name == "" || !(name[0] == '_' || name[0] >= 'a' && name[0] <= 'z' || name[0] >= 'A' && name[0] <= 'Z') {
+			break
+		}
+		valid := true
+		for index := 1; index < len(name); index++ {
+			char := name[index]
+			if char != '_' && (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') && (char < '0' || char > '9') {
+				valid = false
+				break
+			}
+		}
+		if !valid {
+			break
+		}
+		words = words[1:]
+	}
+	if len(words) > 0 && words[0] == "exec" {
+		words = words[1:]
+	}
+	// traceSignature only accepts up to 256 arguments; cap ptrace reads here too.
+	if len(words) == 0 || len(words) > 257 || words[0] == "" {
+		return nil
+	}
+	return words
 }
 
 func traceSupervisor(self string, args []string) int {
@@ -193,7 +273,7 @@ func traceSupervisor(self string, args []string) int {
 	defer runtime.UnlockOSThread()
 	child := exec.Command(self, append([]string{"trace", "child"}, args...)...)
 	child.Stdin, child.Stdout, child.Stderr = os.Stdin, os.Stdout, os.Stderr
-	child.Env = append(os.Environ(), "MESH_TRACE_CHILD=1", "MESH_TRACE_HANDOFF=0", "MESH_TRACE_PROXY_PATH="+self, "SHELL=/usr/bin/bash")
+	child.Env = append(os.Environ(), "SWITCHYARD_TRACE_CHILD=1", "SWITCHYARD_TRACE_HANDOFF=0", "SWITCHYARD_TRACE_PROXY_PATH="+self, "SHELL=/usr/bin/bash")
 	child.SysProcAttr = &syscall.SysProcAttr{Ptrace: true}
 	if err := child.Start(); err != nil {
 		return fail(errors.New("could not start traced Bash"))
@@ -201,9 +281,15 @@ func traceSupervisor(self string, args []string) int {
 	root := child.Process.Pid
 	defer child.Process.Release()
 	live := map[int]bool{root: true}
+	parents := make(map[int]int)
+	standalone := traceStandaloneCommand(args)
 	rootExecSeen := false
-	localSignature := ""
-	localStarted := time.Time{}
+	candidateSeen := false
+	type localSample struct {
+		signature string
+		started   time.Time
+	}
+	samples := make(map[int]localSample)
 	standardFiles := make([]os.FileInfo, 3)
 	for index, file := range []*os.File{os.Stdin, os.Stdout, os.Stderr} {
 		info, err := file.Stat()
@@ -214,8 +300,7 @@ func traceSupervisor(self string, args []string) int {
 	}
 	for len(live) > 0 {
 		var status syscall.WaitStatus
-		var usage syscall.Rusage
-		pid, err := syscall.Wait4(-1, &status, traceAllChildren, &usage)
+		pid, err := syscall.Wait4(-1, &status, traceAllChildren, nil)
 		if err == syscall.EINTR {
 			continue
 		}
@@ -224,13 +309,18 @@ func traceSupervisor(self string, args []string) int {
 		}
 		if status.Exited() || status.Signaled() {
 			delete(live, pid)
-			if pid == root {
-				if status.Exited() && localSignature != "" && !localStarted.IsZero() {
+			delete(parents, pid)
+			if sample, exists := samples[pid]; exists {
+				delete(samples, pid)
+				if status.Exited() {
 					if home, err := dataHome(); err == nil {
-						cpu := time.Duration(usage.Utime.Sec+usage.Stime.Sec)*time.Second + time.Duration(usage.Utime.Usec+usage.Stime.Usec)*time.Microsecond
-						_ = recordCommandObservation(home, localSignature, "local", time.Since(localStarted), cpu)
+						// wait4 reports CPU since this PID began as Bash, not since its
+						// selected exec. Only wall time belongs to this command.
+						_ = recordCommandObservation(home, sample.signature, "local", time.Since(sample.started), 0)
 					}
 				}
+			}
+			if pid == root {
 				code := 128 + int(status.Signal())
 				if status.Exited() {
 					code = status.ExitStatus()
@@ -267,15 +357,29 @@ func traceSupervisor(self string, args []string) int {
 				return fail(errors.New("could not follow spawned process"))
 			}
 			live[int(child)] = true
+			parents[int(child)] = pid
 		}
-		if event == traceEventSeccomp && pid == root {
-			if !rootExecSeen {
+		if event == traceEventSeccomp {
+			if pid == root && !rootExecSeen {
 				// The first filtered exec starts Bash itself, before it parses -c.
 				rootExecSeen = true
-			} else {
-				localSignature, localStarted = traceSignature(pid), time.Now()
-				if traceRedirect(pid, self, standardFiles) {
-					localSignature = ""
+			} else if !candidateSeen && standalone != nil && (pid == root || parents[pid] == root) && traceMatchesCommand(pid, standalone) {
+				// A foreground Bash child has the same streams and exit semantics as
+				// the standalone script. Claim only its first matching exec: tools
+				// can launch another executable with the same name and arguments.
+				candidateSeen = true
+				if signature := traceSignature(pid); signature != "" {
+					backend := os.Getenv("SWITCHYARD_BACKEND")
+					auto := backend == "" || backend == "auto"
+					if !auto || traceAutoReady(self, pid, standalone) {
+						if traceRedirect(pid, self, standardFiles) {
+							delete(samples, pid)
+						} else if auto {
+							samples[pid] = localSample{signature: signature, started: time.Now()}
+						}
+					} else {
+						samples[pid] = localSample{signature: signature, started: time.Now()}
+					}
 				}
 			}
 		}
@@ -350,6 +454,68 @@ func traceSignature(pid int) string {
 	return ""
 }
 
+func traceAutoReady(self string, pid int, expected []string) bool {
+	var regs syscall.PtraceRegs
+	if syscall.PtraceGetRegs(pid, &regs) != nil || regs.Orig_rax != syscall.SYS_EXECVE {
+		return false
+	}
+	path, ok := traceString(pid, regs.Rdi, traceMaxString)
+	if !ok {
+		return false
+	}
+	real, err := realTool(filepath.Base(expected[0]), self)
+	if err != nil {
+		return false
+	}
+	selected, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	resolved, err := os.Stat(real)
+	if err != nil || !os.SameFile(selected, resolved) {
+		return false
+	}
+	cwd, err := os.Readlink("/proc/" + strconv.Itoa(pid) + "/cwd")
+	if err != nil {
+		return false
+	}
+	signature, valid := commandSignature(cwd, real, expected[1:])
+	if !valid {
+		return false
+	}
+	home, err := dataHome()
+	return err == nil && observedReadyBackend(home, self, signature) != ""
+}
+
+func traceMatchesCommand(pid int, expected []string) bool {
+	var regs syscall.PtraceRegs
+	if syscall.PtraceGetRegs(pid, &regs) != nil || regs.Orig_rax != syscall.SYS_EXECVE {
+		return false
+	}
+	path, ok := traceString(pid, regs.Rdi, traceMaxString)
+	if !ok || !filepath.IsAbs(path) || filepath.Base(path) != filepath.Base(expected[0]) {
+		return false
+	}
+	// Bash can try several PATH entries before the executable exists. A failed
+	// lookup must not claim the only candidate for this shell invocation.
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return false
+	}
+	for index, value := range expected[1:] {
+		pointer, ok := tracePointer(pid, regs.Rsi+uint64((index+1)*8))
+		if !ok || pointer == 0 {
+			return false
+		}
+		actual, ok := traceString(pid, pointer, traceMaxString)
+		if !ok || actual != value {
+			return false
+		}
+	}
+	end, ok := tracePointer(pid, regs.Rsi+uint64(len(expected)*8))
+	return ok && end == 0
+}
+
 func traceRedirect(pid int, self string, standardFiles []os.FileInfo) bool {
 	var regs syscall.PtraceRegs
 	if syscall.PtraceGetRegs(pid, &regs) != nil {
@@ -413,22 +579,22 @@ func traceRedirect(pid int, self string, standardFiles []os.FileInfo) bool {
 			return false
 		}
 		name, _, _ := strings.Cut(value, "=")
-		if name == "PATH" || name == "MESH_BACKEND" || name == "MESH_TRACE_PROXY_PATH" || name == "MESH_TRACE_HANDOFF" || name == "MESH_TRACE_BYPASS" || name == "MESH_TRACE_PREVIEWED" {
+		if name == "PATH" || name == "SWITCHYARD_BACKEND" || name == "SWITCHYARD_TRACE_PROXY_PATH" || name == "SWITCHYARD_TRACE_HANDOFF" || name == "SWITCHYARD_TRACE_BYPASS" || name == "SWITCHYARD_TRACE_PREVIEWED" {
 			if seen[name] {
 				return false
 			}
 			seen[name] = true
 		}
 		switch {
-		case strings.HasPrefix(value, "MESH_TRACE_PROXY_PATH="):
-			proxyAddress = ptr + uint64(len("MESH_TRACE_PROXY_PATH="))
-		case value == "MESH_TRACE_HANDOFF=0":
-			handoffAddress = ptr + uint64(len("MESH_TRACE_HANDOFF="))
-		case strings.HasPrefix(value, "MESH_BACKEND="):
-			backend = strings.TrimPrefix(value, "MESH_BACKEND=")
-		case value == "MESH_TRACE_BYPASS=1":
+		case strings.HasPrefix(value, "SWITCHYARD_TRACE_PROXY_PATH="):
+			proxyAddress = ptr + uint64(len("SWITCHYARD_TRACE_PROXY_PATH="))
+		case value == "SWITCHYARD_TRACE_HANDOFF=0":
+			handoffAddress = ptr + uint64(len("SWITCHYARD_TRACE_HANDOFF="))
+		case strings.HasPrefix(value, "SWITCHYARD_BACKEND="):
+			backend = strings.TrimPrefix(value, "SWITCHYARD_BACKEND=")
+		case value == "SWITCHYARD_TRACE_BYPASS=1":
 			bypass = true
-		case value == "MESH_TRACE_PREVIEWED=1":
+		case value == "SWITCHYARD_TRACE_PREVIEWED=1":
 			previewed = true
 		case strings.HasPrefix(value, "PATH="):
 			pathValue, pathSet = strings.TrimPrefix(value, "PATH="), true
@@ -437,7 +603,7 @@ func traceRedirect(pid int, self string, standardFiles []os.FileInfo) bool {
 	if !environmentComplete || backend == "local" || bypass || backend == "auto" && !previewed || !pathSet || proxyAddress == 0 || handoffAddress == 0 || !filepath.IsAbs(self) {
 		return false
 	}
-	// The requested executable must be the same inode Mesh would find on PATH.
+	// The requested executable must be the same inode Switchyard would find on PATH.
 	selected, err := os.Stat(path)
 	if err != nil || !selected.Mode().IsRegular() || selected.Mode().Perm()&0o111 == 0 {
 		return false
@@ -457,7 +623,7 @@ func traceRedirect(pid int, self string, standardFiles []os.FileInfo) bool {
 		return false
 	}
 	// Keep Bash's resolved path in argv[0] while replacing only the syscall's
-	// executable path. The Mesh hook checks its inode against the current PATH.
+	// executable path. The Switchyard hook checks its inode against the current PATH.
 	var replacement [8]byte
 	binaryle.LittleEndian.PutUint64(replacement[:], pathPtr)
 	if _, err := syscall.PtracePokeData(pid, uintptr(argvPtr), replacement[:]); err != nil {

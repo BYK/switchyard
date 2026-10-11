@@ -1,4 +1,4 @@
-package mesh
+package switchyard
 
 import (
 	"context"
@@ -37,7 +37,7 @@ func realTool(tool, self string) (string, error) {
 			return path, nil
 		}
 	}
-	return "", errors.New("hooked tool was not found outside Mesh shims")
+	return "", errors.New("hooked tool was not found outside Switchyard shims")
 }
 
 func shimDirectory(home string) string {
@@ -55,7 +55,7 @@ func installShims(home, self string) error {
 	if err := privateTree(dir); err != nil {
 		return err
 	}
-	names := []string{"meshell", "mesh-shell"}
+	names := []string{"switchyard-shell"}
 	for name := range hookTools {
 		names = append(names, name)
 	}
@@ -101,7 +101,7 @@ func runHook(home, self string, args []string) int {
 	}
 	tool := args[0]
 	command := args[1:]
-	traced := os.Getenv("MESH_TRACE_HANDOFF") == "1"
+	traced := os.Getenv("SWITCHYARD_TRACE_HANDOFF") == "1"
 	if traced && !fromShell {
 		if !filepath.IsAbs(tool) {
 			return fail(errors.New("traced command needs an absolute resolved path"))
@@ -127,20 +127,20 @@ func runHook(home, self string, args []string) int {
 	} else if lookupErr != nil {
 		return fail(lookupErr)
 	}
-	backend := os.Getenv("MESH_BACKEND")
+	backend := os.Getenv("SWITCHYARD_BACKEND")
 	if backend == "" {
 		backend = "auto"
 	}
 	if backend != "auto" && backend != "local" && !remoteName.MatchString(backend) {
-		return fail(errors.New("invalid MESH_BACKEND override"))
+		return fail(errors.New("invalid SWITCHYARD_BACKEND override"))
 	}
 	if resolvedMismatch && backend != "auto" && backend != "local" {
-		return fail(errors.New("Bash resolved a different command than Mesh; cannot offload"))
+		return fail(errors.New("Bash resolved a different command than Switchyard; cannot offload"))
 	}
 	// A direct exec preserves PID, open descriptors, signals and exit status.
 	// Unrecognized subcommands and ordinary PATH shims with a terminal stay local.
 	interactive := isTTY(os.Stdin)
-	previewed := os.Getenv("MESH_TRACE_PREVIEWED") == "1"
+	previewed := os.Getenv("SWITCHYARD_TRACE_PREVIEWED") == "1"
 	if traced && !previewed && backend != "auto" && backend != "local" {
 		return fail(errors.New("preview and inspect every selected and excluded path before forced tracing"))
 	}
@@ -156,7 +156,7 @@ func runHook(home, self string, args []string) int {
 	}
 	if backend == "local" || backend == "auto" || resolvedMismatch || traced && !previewed || interactive && !fromShell && !traced {
 		if traced {
-			if err := os.Setenv("MESH_TRACE_BYPASS", "1"); err != nil {
+			if err := os.Setenv("SWITCHYARD_TRACE_BYPASS", "1"); err != nil {
 				return fail(errors.New("could not mark local traced tool"))
 			}
 		}
@@ -174,7 +174,7 @@ func runHook(home, self string, args []string) int {
 			return fail(err)
 		}
 		if traced {
-			if err := os.Setenv("MESH_TRACE_BYPASS", "1"); err != nil {
+			if err := os.Setenv("SWITCHYARD_TRACE_BYPASS", "1"); err != nil {
 				return fail(errors.New("could not mark local traced tool"))
 			}
 		}
@@ -206,6 +206,14 @@ func observedReadyBackendAtPressure(home, self, signature string, busy bool) str
 			names = append(names, observedBackendID(provider))
 		}
 	}
+	if best := preferredObservedBackend(home, signature, names); best != "" {
+		for _, provider := range providers {
+			if observedBackendID(provider) == best && isAWSWorker(provider.Name()) && !provider.Ready(context.Background()) {
+				awsRequestWake()
+				break
+			}
+		}
+	}
 	for len(names) > 0 {
 		best := preferredObservedBackend(home, signature, names)
 		if best == "" {
@@ -213,6 +221,22 @@ func observedReadyBackendAtPressure(home, self, signature string, busy bool) str
 		}
 		for _, provider := range providers {
 			if observedBackendID(provider) == best && provider.Ready(context.Background()) {
+				if isAWSWorker(provider.Name()) {
+					free, err := awsWorkerAvailable(provider.Name())
+					if err != nil || !free {
+						if err == nil {
+							awsRequestScale()
+						}
+						for _, other := range providers {
+							if isAWSWorker(other.Name()) && supports(other.cfg, []string{"cpu"}) && other.Ready(context.Background()) {
+								if available, err := awsWorkerAvailable(other.Name()); err == nil && available {
+									return other.Name()
+								}
+							}
+						}
+						continue
+					}
+				}
 				return provider.Name()
 			}
 		}

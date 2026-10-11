@@ -1,4 +1,4 @@
-package mesh
+package switchyard
 
 import (
 	"context"
@@ -38,7 +38,7 @@ func shellCommand(script string) []string {
 }
 
 func runShell(home, self string, args []string) int {
-	if os.Getenv("MESH_CONTAINER_IMAGE") != "" {
+	if os.Getenv("SWITCHYARD_CONTAINER_IMAGE") != "" {
 		return runContainerShell(home, args)
 	}
 	local := func() int {
@@ -54,15 +54,15 @@ func runShell(home, self string, args []string) int {
 	if len(argv) == 0 {
 		return local()
 	}
-	backend := os.Getenv("MESH_BACKEND")
+	backend := os.Getenv("SWITCHYARD_BACKEND")
 	if backend == "" {
 		backend = "auto"
 	}
-	if backend == "local" || backend == "auto" && os.Getenv("MESH_TRACE_PREVIEWED") != "1" {
+	if backend == "local" || backend == "auto" && os.Getenv("SWITCHYARD_TRACE_PREVIEWED") != "1" {
 		return local()
 	}
 	if backend != "auto" && !remoteName.MatchString(backend) {
-		return fail(errors.New("invalid MESH_BACKEND override"))
+		return fail(errors.New("invalid SWITCHYARD_BACKEND override"))
 	}
 	start, err := os.Getwd()
 	if err != nil {

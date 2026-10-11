@@ -1,4 +1,4 @@
-package mesh
+package switchyard
 
 import (
 	"encoding/json"
@@ -16,14 +16,14 @@ func containerJobEnvironment(environment []string, target string) []string {
 	result := make([]string, 0, len(environment)+5)
 	for _, entry := range environment {
 		name, _, _ := strings.Cut(entry, "=")
-		if name != "HOME" && name != "PATH" && name != "PWD" && name != "TMPDIR" && name != "XDG_CACHE_HOME" && name != "XDG_CONFIG_HOME" && name != "XDG_DATA_HOME" && name != "XDG_RUNTIME_DIR" && name != "MESH_BACKEND" && name != "MESH_CONTAINER_RUNTIME" && name != "npm_config_store_dir" && name != "NPM_CONFIG_STORE_DIR" && name != "PNPM_STORE_DIR" {
+		if name != "HOME" && name != "PATH" && name != "PWD" && name != "TMPDIR" && name != "XDG_CACHE_HOME" && name != "XDG_CONFIG_HOME" && name != "XDG_DATA_HOME" && name != "XDG_RUNTIME_DIR" && name != "SWITCHYARD_BACKEND" && name != "SWITCHYARD_CONTAINER_RUNTIME" && name != "npm_config_store_dir" && name != "NPM_CONFIG_STORE_DIR" && name != "PNPM_STORE_DIR" {
 			result = append(result, entry)
 		}
 	}
-	return append(result, "HOME=/home/mesh", "PATH=/usr/local/bin:/usr/bin:/bin", "TMPDIR=/tmp",
-		"XDG_CACHE_HOME=/home/mesh/.cache", "XDG_CONFIG_HOME=/home/mesh/.config",
-		"XDG_DATA_HOME=/home/mesh/.local/share", "npm_config_store_dir=/home/mesh/.local/share/pnpm/store",
-		"PWD="+target, "MESH_BACKEND=local")
+	return append(result, "HOME=/home/switchyard", "PATH=/usr/local/bin:/usr/bin:/bin", "TMPDIR=/tmp",
+		"XDG_CACHE_HOME=/home/switchyard/.cache", "XDG_CONFIG_HOME=/home/switchyard/.config",
+		"XDG_DATA_HOME=/home/switchyard/.local/share", "npm_config_store_dir=/home/switchyard/.local/share/pnpm/store",
+		"PWD="+target, "SWITCHYARD_BACKEND=local")
 }
 
 // Container engines must use the worker account's runtime state, not the
@@ -39,13 +39,13 @@ func containerEngineEnvironment(environment []string) ([]string, error) {
 	}
 	for _, entry := range environment {
 		name, _, _ := strings.Cut(entry, "=")
-		if name == "MESH_CONTAINER_RUNTIME" {
+		if name == "SWITCHYARD_CONTAINER_RUNTIME" {
 			continue
 		}
 		if containerEngineControl(name) {
 			return nil, errors.New("invocation environment cannot override container engine configuration")
 		}
-		if name != "HOME" && name != "PATH" && name != "PWD" && name != "TMPDIR" && name != "XDG_CACHE_HOME" && name != "XDG_CONFIG_HOME" && name != "XDG_DATA_HOME" && name != "XDG_RUNTIME_DIR" && name != "MESH_BACKEND" && name != "USER" && name != "LOGNAME" && name != "npm_config_store_dir" {
+		if name != "HOME" && name != "PATH" && name != "PWD" && name != "TMPDIR" && name != "XDG_CACHE_HOME" && name != "XDG_CONFIG_HOME" && name != "XDG_DATA_HOME" && name != "XDG_RUNTIME_DIR" && name != "SWITCHYARD_BACKEND" && name != "USER" && name != "LOGNAME" && name != "npm_config_store_dir" {
 			result = append(result, entry)
 		}
 	}
@@ -56,7 +56,7 @@ func containerEngineControl(name string) bool {
 	return strings.HasPrefix(name, "DOCKER_") || strings.HasPrefix(name, "CONTAINER_") ||
 		strings.HasPrefix(name, "CONTAINERS_") || strings.HasPrefix(name, "BUILDAH_") || strings.HasPrefix(name, "PODMAN_") ||
 		strings.HasPrefix(name, "STORAGE_") ||
-		name == "REGISTRY_AUTH_FILE" || name == "MESH_CONTAINER_RUNTIME"
+		name == "REGISTRY_AUTH_FILE" || name == "SWITCHYARD_CONTAINER_RUNTIME"
 }
 
 func containerPackageRoot(checkout, target, lock string) (string, error) {
@@ -146,16 +146,16 @@ cd "$4" || exit 2
 shift 4
 exec "$@"`
 		containerArgs[0] = manager
-		containerArgs = append([]string{"sh", "-c", script, "mesh-node-setup", packageRoot,
-			manager, "/mesh-setup/ready", target}, containerArgs...)
+		containerArgs = append([]string{"sh", "-c", script, "switchyard-node-setup", packageRoot,
+			manager, "/switchyard-setup/ready", target}, containerArgs...)
 	}
 	network := "none"
 	if setup {
 		network = "bridge"
 	}
-	if override := os.Getenv("MESH_WORKER_NETWORK"); override != "" {
+	if override := os.Getenv("SWITCHYARD_WORKER_NETWORK"); override != "" {
 		if override != "none" && override != "bridge" {
-			return nil, setup, errors.New("MESH_WORKER_NETWORK must be none or bridge")
+			return nil, setup, errors.New("SWITCHYARD_WORKER_NETWORK must be none or bridge")
 		}
 		network = override
 	}
@@ -167,11 +167,11 @@ exec "$@"`
 		"--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()), "--cap-drop=ALL",
 		"--security-opt=no-new-privileges", "--pids-limit=512",
 		"--cidfile", filepath.Join(jobPath, "container.cid"),
-		"--label", "mesh.job=" + filepath.Base(jobPath),
-		"--label", "mesh.project=" + filepath.Base(filepath.Dir(filepath.Dir(jobPath))),
+		"--label", "switchyard.job=" + filepath.Base(jobPath),
+		"--label", "switchyard.project=" + filepath.Base(filepath.Dir(filepath.Dir(jobPath))),
 		"--mount", "type=bind,source=" + checkout + ",target=/workspace",
-		"--mount", "type=bind,source=" + cache + ",target=/home/mesh",
-		"--mount", "type=bind,source=" + setupDir + ",target=/mesh-setup",
+		"--mount", "type=bind,source=" + cache + ",target=/home/switchyard",
+		"--mount", "type=bind,source=" + setupDir + ",target=/switchyard-setup",
 		"--workdir", target}
 	if image.Runtime == "podman" {
 		args = append(args, "--userns=keep-id", "--http-proxy=false")
@@ -187,7 +187,7 @@ exec "$@"`
 			identityEnv = append(identityEnv, entry)
 			continue
 		}
-		if name == "HOME" || name == "PATH" || name == "PWD" || name == "TMPDIR" || name == "XDG_CACHE_HOME" || name == "XDG_CONFIG_HOME" || name == "XDG_DATA_HOME" || name == "MESH_BACKEND" || name == "npm_config_store_dir" {
+		if name == "HOME" || name == "PATH" || name == "PWD" || name == "TMPDIR" || name == "XDG_CACHE_HOME" || name == "XDG_CONFIG_HOME" || name == "XDG_DATA_HOME" || name == "SWITCHYARD_BACKEND" || name == "npm_config_store_dir" {
 			args = append(args, "--env", entry)
 		} else {
 			args = append(args, "--env", name)
@@ -250,7 +250,7 @@ func stopJobContainer(path, project, job string) {
 	if !validImageID("sha256:" + id) {
 		return
 	}
-	labels := exec.Command(runtime, "inspect", "--format", "{{index .Config.Labels \"mesh.job\"}} {{index .Config.Labels \"mesh.project\"}}", id)
+	labels := exec.Command(runtime, "inspect", "--format", "{{index .Config.Labels \"switchyard.job\"}} {{index .Config.Labels \"switchyard.project\"}}", id)
 	output, err := labels.Output()
 	if err != nil || strings.TrimSpace(string(output)) != job+" "+project {
 		return

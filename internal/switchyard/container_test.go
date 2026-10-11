@@ -1,4 +1,4 @@
-package mesh
+package switchyard
 
 import (
 	"bufio"
@@ -40,15 +40,15 @@ func TestContainerCWDRejectsMountedDockerSocket(t *testing.T) {
 	}
 }
 
-// Run with MESH_TEST_CONTAINER_IMAGE set to a locally cached, digest-pinned
+// Run with SWITCHYARD_TEST_CONTAINER_IMAGE set to a locally cached, digest-pinned
 // image with /bin/bash (for example, docker.io/library/ubuntu@sha256:...).
 func TestContainerShellSharesCWDAndOffersFreshIsolation(t *testing.T) {
-	if parent := os.Getenv("MESH_TEST_DOCKER_PARENT"); parent != "" {
+	if parent := os.Getenv("SWITCHYARD_TEST_DOCKER_PARENT"); parent != "" {
 		t.Setenv("TMPDIR", parent)
 	}
-	image := os.Getenv("MESH_TEST_CONTAINER_IMAGE")
+	image := os.Getenv("SWITCHYARD_TEST_CONTAINER_IMAGE")
 	if image == "" {
-		t.Skip("set MESH_TEST_CONTAINER_IMAGE to run the Docker integration test")
+		t.Skip("set SWITCHYARD_TEST_CONTAINER_IMAGE to run the Docker integration test")
 	}
 	if !containerImagePattern.MatchString(image) {
 		t.Fatal("test image must be pinned by digest")
@@ -56,19 +56,19 @@ func TestContainerShellSharesCWDAndOffersFreshIsolation(t *testing.T) {
 	root := fixture(t)
 	home := t.TempDir()
 	exe := binary(t)
-	entry := filepath.Join(t.TempDir(), "meshell")
+	entry := filepath.Join(t.TempDir(), "switchyard-shell")
 	if err := os.Symlink(exe, entry); err != nil {
 		t.Fatal(err)
 	}
-	baseEnv := append(os.Environ(), "MESH_GO_HOME="+home,
-		"MESH_CONTAINER_IMAGE="+image, "MESH_CONTAINER_NETWORK=none",
-		"MESH_CONTAINER_TEST=first\nsecond=ok")
+	baseEnv := append(os.Environ(), "SWITCHYARD_HOME="+home,
+		"SWITCHYARD_CONTAINER_IMAGE="+image, "SWITCHYARD_CONTAINER_NETWORK=none",
+		"SWITCHYARD_CONTAINER_TEST=first\nsecond=ok")
 	invoke := func(mode, command string, expected int) string {
 		t.Helper()
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, entry, "-c", command)
-		cmd.Env = append(baseEnv, "MESH_CONTAINER_MODE="+mode)
+		cmd.Env = append(baseEnv, "SWITCHYARD_CONTAINER_MODE="+mode)
 		cmd.Dir = root
 		output, err := cmd.CombinedOutput()
 		if ctx.Err() != nil || exitStatus(err) != expected {
@@ -79,13 +79,13 @@ func TestContainerShellSharesCWDAndOffersFreshIsolation(t *testing.T) {
 	}
 	cleanup := func() {
 		cmd := exec.Command(exe, "container", "stop", "--cwd", root)
-		cmd.Env = append(os.Environ(), "MESH_GO_HOME="+home)
+		cmd.Env = append(os.Environ(), "SWITCHYARD_HOME="+home)
 		if output, err := cmd.CombinedOutput(); err != nil {
 			t.Errorf("could not remove test container: %s", output)
 		}
 	}
 	t.Cleanup(cleanup)
-	first := invoke("shared", `test "$MESH_CONTAINER_TEST" = $'first\nsecond=ok' && test "$PWD" = "$(pwd)" && test "$HOME" = /home/mesh && test ! -e /var/run/docker.sock && printf 'local edit\n' > live.txt && printf 'session\n' > "$HOME/marker" && cat /etc/hostname`, 0)
+	first := invoke("shared", `test "$SWITCHYARD_CONTAINER_TEST" = $'first\nsecond=ok' && test "$PWD" = "$(pwd)" && test "$HOME" = /home/switchyard && test ! -e /var/run/docker.sock && printf 'local edit\n' > live.txt && printf 'session\n' > "$HOME/marker" && cat /etc/hostname`, 0)
 	if data, err := os.ReadFile(filepath.Join(root, "live.txt")); err != nil || string(data) != "local edit\n" {
 		t.Fatal("local container did not use the writable live CWD mount")
 	}
@@ -94,19 +94,19 @@ func TestContainerShellSharesCWDAndOffersFreshIsolation(t *testing.T) {
 		t.Fatal("commands at the same CWD did not share one sandbox")
 	}
 	status := exec.Command(exe, "container", "status", "--cwd", root)
-	status.Env = append(os.Environ(), "MESH_GO_HOME="+home)
+	status.Env = append(os.Environ(), "SWITCHYARD_HOME="+home)
 	if output, err := status.CombinedOutput(); err != nil || !strings.Contains(string(output), "running") {
 		t.Fatalf("sandbox is not reported running: %s", output)
 	}
 	changedProfile := exec.Command(entry, "-c", "exit 0")
 	changedProfile.Dir = root
-	changedProfile.Env = append(baseEnv, "MESH_CONTAINER_NETWORK=bridge")
+	changedProfile.Env = append(baseEnv, "SWITCHYARD_CONTAINER_NETWORK=bridge")
 	if output, err := changedProfile.CombinedOutput(); exitStatus(err) != 2 || !strings.Contains(string(output), "different image or settings") {
 		t.Fatalf("CWD sandbox silently changed network profile: %s", output)
 	}
 	spoofed := exec.Command(entry, "-c", "test ! -e /var/run/docker.sock && cat /etc/hostname")
 	spoofed.Dir = root
-	spoofed.Env = append(baseEnv, "MESH_CONTAINER_SESSION=forged")
+	spoofed.Env = append(baseEnv, "SWITCHYARD_CONTAINER_SESSION=forged")
 	if output, err := spoofed.CombinedOutput(); err != nil || strings.TrimSpace(string(output)) != first {
 		t.Fatalf("host environment bypassed the sandbox: %s", output)
 	}
@@ -114,7 +114,7 @@ func TestContainerShellSharesCWDAndOffersFreshIsolation(t *testing.T) {
 	serviceCtx, cancelService := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancelService()
 	service := exec.CommandContext(serviceCtx, entry, "-c", `printf 'ready\n'; IFS= read -r message; test "$message" = finished`)
-	service.Env = append(baseEnv, "MESH_CONTAINER_MODE=shared")
+	service.Env = append(baseEnv, "SWITCHYARD_CONTAINER_MODE=shared")
 	service.Dir = root
 	serviceInput, err := service.StdinPipe()
 	if err != nil {
@@ -171,13 +171,13 @@ func TestContainerShellSharesCWDAndOffersFreshIsolation(t *testing.T) {
 		pty := exec.CommandContext(ptyCtx, "script", "-q", "-e", "-c",
 			quote(entry)+" -c "+quote("test -t 0 && test -t 1 && printf tty-ok"), "/dev/null")
 		pty.Dir = root
-		pty.Env = append(baseEnv, "MESH_CONTAINER_MODE=shared")
+		pty.Env = append(baseEnv, "SWITCHYARD_CONTAINER_MODE=shared")
 		if output, err := pty.CombinedOutput(); err != nil || !strings.Contains(string(output), "tty-ok") {
 			t.Fatalf("interactive shell lost its terminal: %s; err=%v", output, err)
 		}
 	}
 	stop := exec.Command(exe, "container", "stop", "--cwd", root)
-	stop.Env = append(os.Environ(), "MESH_GO_HOME="+home)
+	stop.Env = append(os.Environ(), "SWITCHYARD_HOME="+home)
 	if output, err := stop.CombinedOutput(); err != nil {
 		t.Fatalf("could not prepare concurrent start: %s", output)
 	}
@@ -189,7 +189,7 @@ func TestContainerShellSharesCWDAndOffersFreshIsolation(t *testing.T) {
 	for i := range commands {
 		commands[i] = exec.CommandContext(concurrentCtx, entry, "-c", "cat /etc/hostname")
 		commands[i].Dir = root
-		commands[i].Env = append(baseEnv, "MESH_CONTAINER_MODE=shared")
+		commands[i].Env = append(baseEnv, "SWITCHYARD_CONTAINER_MODE=shared")
 		outputBuffers[i] = &bytes.Buffer{}
 		stderrBuffers[i] = &bytes.Buffer{}
 		commands[i].Stdout = outputBuffers[i]

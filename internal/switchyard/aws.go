@@ -1,11 +1,14 @@
-package mesh
+package switchyard
 
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -21,8 +24,8 @@ import (
 
 const (
 	awsRegion  = "eu-west-2"
-	awsName    = "byk-compute-mesh-worker"
-	awsRoot    = "/home/ubuntu/.local/share/compute-mesh-go/worker"
+	awsName    = "byk-switchyard-worker"
+	awsRoot    = "/home/ubuntu/.local/share/switchyard/worker"
 	awsCommand = "/home/ubuntu/.local/bin/switchyard"
 )
 
@@ -34,21 +37,25 @@ type awsTag struct {
 	Value string `json:"Value"`
 }
 
-var awsTags = []awsTag{{Key: "Name", Value: awsName}, {Key: "Purpose", Value: "compute-mesh-single-worker"}}
+var awsTags = []awsTag{{Key: "Name", Value: awsName}, {Key: "Purpose", Value: "switchyard-single-worker"}}
 
 type awsState struct {
-	Account    string  `json:"account"`
-	Region     string  `json:"region"`
-	CreatedAt  float64 `json:"created_at"`
-	InstanceID string  `json:"instance_id,omitempty"`
-	GroupID    string  `json:"group_id,omitempty"`
-	KeyName    string  `json:"key_name,omitempty"`
-	ClientIP   string  `json:"client_ip,omitempty"`
+	Account     string  `json:"account"`
+	Region      string  `json:"region"`
+	CreatedAt   float64 `json:"created_at"`
+	InstanceID  string  `json:"instance_id,omitempty"`
+	GroupID     string  `json:"group_id,omitempty"`
+	KeyName     string  `json:"key_name,omitempty"`
+	ClientIP    string  `json:"client_ip,omitempty"`
+	Slot        int     `json:"slot,omitempty"`
+	LaunchToken string  `json:"launch_token,omitempty"`
 }
 
 type awsInstance struct {
 	InstanceID      string                `json:"InstanceId"`
 	PublicIPAddress string                `json:"PublicIpAddress"`
+	ImageID         string                `json:"ImageId"`
+	SubnetID        string                `json:"SubnetId"`
 	State           struct{ Name string } `json:"State"`
 	Tags            []awsTag              `json:"Tags"`
 }
@@ -58,6 +65,8 @@ var (
 	awsResourceID     = regexp.MustCompile(`^(i|sg|ami)-[0-9a-f]+$`)
 	awsConsoleKey     = regexp.MustCompile(`cloud-init: 256 (SHA256:[A-Za-z0-9+/=]+) [^\n]+ \(ED25519\)`)
 	awsCommandToken   = regexp.MustCompile(`^[A-Za-z0-9_./=-]+$`)
+	awsProfileName    = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+	awsRoleName       = regexp.MustCompile(`^[A-Za-z0-9+=,.@_-]{1,64}$`)
 )
 
 type awsDiagnostic struct{ data bytes.Buffer }
@@ -70,25 +79,122 @@ func (diagnostic *awsDiagnostic) Write(content []byte) (int, error) {
 }
 
 func awsDirectory() (string, error) {
-	if override := os.Getenv("MESH_AWS_HOME"); override != "" {
+	if override := os.Getenv("SWITCHYARD_AWS_HOME"); override != "" {
 		return filepath.Abs(override)
 	}
-	if legacy := os.Getenv("MESH_HOME"); legacy != "" {
-		return filepath.Join(legacy, "aws-worker"), nil
-	}
-	home, err := os.UserHomeDir()
+	home, err := dataHome()
 	if err != nil {
-		return "", errors.New("could not locate the AWS worker state")
+		return "", err
 	}
-	// Keep the Python worker's tracked keys and resources when moving to Go.
-	return filepath.Join(home, ".local", "share", "compute-mesh", "aws-worker"), nil
+	return filepath.Join(home, "aws-worker"), nil
 }
 
 func awsStatePath(dir string) string { return filepath.Join(dir, "state.json") }
+
+func awsPoolDir(base string, slot int) string {
+	if slot == 1 {
+		return base
+	}
+	return filepath.Join(base, "pool", strconv.Itoa(slot))
+}
+
+func awsSlot(dir string) int {
+	if filepath.Base(filepath.Dir(dir)) == "pool" {
+		if value, err := strconv.Atoi(filepath.Base(dir)); err == nil && value >= 2 && value <= 4 {
+			return value
+		}
+	}
+	return 1
+}
+
+func awsBackendName(dir string) string {
+	if slot := awsSlot(dir); slot != 1 {
+		return "aws-" + strconv.Itoa(slot)
+	}
+	return "aws"
+}
+
+func awsPoolBase(dir string) string {
+	if awsSlot(dir) > 1 {
+		return filepath.Dir(filepath.Dir(dir))
+	}
+	return dir
+}
 func awsKeyPath(dir string) string   { return filepath.Join(dir, "worker-key") }
 func awsKnownPath(dir string) string { return filepath.Join(dir, "known_hosts") }
 
+// The selected profile belongs to Switchyard, not to the OpenCode service or
+// its shared environment file. It survives destruction of a worker.
+type awsAuthSelection struct {
+	Profile string `json:"profile"`
+	Role    string `json:"role"`
+	Account string `json:"account"`
+}
+
+func awsAuthPath(dir string) string { return filepath.Join(dir, "auth.json") }
+
+func awsSelectedAuth(dir string) (awsAuthSelection, bool, error) {
+	if err := privateTree(dir); err != nil {
+		return awsAuthSelection{}, false, err
+	}
+	if _, err := os.Lstat(awsAuthPath(dir)); os.IsNotExist(err) {
+		return awsAuthSelection{}, false, nil
+	} else if err != nil {
+		return awsAuthSelection{}, false, errors.New("could not inspect AWS profile selection")
+	}
+	content, err := privateRead(awsAuthPath(dir), 4096)
+	if err != nil {
+		return awsAuthSelection{}, false, errors.New("AWS profile selection is not private")
+	}
+	var selected awsAuthSelection
+	if json.Unmarshal(content, &selected) != nil || !awsProfileName.MatchString(selected.Profile) || !awsRoleName.MatchString(selected.Role) || !awsAccountPattern.MatchString(selected.Account) {
+		return awsAuthSelection{}, false, errors.New("AWS profile selection is invalid")
+	}
+	return selected, true, nil
+}
+
+func awsCredentialEnvironment(profile string) []string {
+	// AWS credential variables override named profiles. They must never turn a
+	// pinned role request into a call authenticated with the parent's credentials.
+	blocked := map[string]bool{
+		"AWS_PROFILE": true, "AWS_DEFAULT_PROFILE": true,
+		"AWS_ACCESS_KEY_ID": true, "AWS_SECRET_ACCESS_KEY": true,
+		"AWS_SESSION_TOKEN": true, "AWS_SECURITY_TOKEN": true,
+		"AWS_ROLE_ARN": true, "AWS_WEB_IDENTITY_TOKEN_FILE": true,
+		"AWS_CONTAINER_CREDENTIALS_FULL_URI":     true,
+		"AWS_CONTAINER_CREDENTIALS_RELATIVE_URI": true,
+		"AWS_CONTAINER_AUTHORIZATION_TOKEN":      true,
+		"AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE": true,
+	}
+	environment := make([]string, 0, len(os.Environ())+1)
+	for _, value := range os.Environ() {
+		name, _, _ := strings.Cut(value, "=")
+		if !blocked[name] {
+			environment = append(environment, value)
+		}
+	}
+	return append(environment, "AWS_PROFILE="+profile)
+}
+
 func awsCall(parts ...string) (map[string]json.RawMessage, error) {
+	dir, err := awsDirectory()
+	if err != nil {
+		return nil, err
+	}
+	selected, exists, err := awsSelectedAuth(dir)
+	if err != nil {
+		return nil, err
+	}
+	if exists {
+		if override := os.Getenv("AWS_PROFILE"); override != "" && override != selected.Profile {
+			return nil, errors.New("AWS_PROFILE conflicts with Switchyard's selected profile")
+		}
+		return awsCallWithProfile(selected.Profile, parts...)
+	}
+	return awsCallWithProfile("", parts...)
+}
+
+func awsCallWithProfile(profile string, parts ...string) (map[string]json.RawMessage, error) {
 	if len(parts) < 2 {
 		return nil, errors.New("invalid AWS operation")
 	}
@@ -96,6 +202,9 @@ func awsCall(parts ...string) (map[string]json.RawMessage, error) {
 	defer cancel()
 	args := append(append([]string{}, parts...), "--region", awsRegion, "--output", "json")
 	cmd := exec.CommandContext(ctx, "aws", args...)
+	if profile != "" {
+		cmd.Env = awsCredentialEnvironment(profile)
+	}
 	var output responseBuffer
 	output.limit = 4 << 20
 	cmd.Stdout = &output
@@ -147,7 +256,68 @@ func awsAccount() (string, error) {
 	if err != nil || !awsAccountPattern.MatchString(account) {
 		return "", errors.New("AWS identity is invalid")
 	}
+	dir, err := awsDirectory()
+	if err != nil {
+		return "", err
+	}
+	selected, exists, err := awsSelectedAuth(dir)
+	if err != nil {
+		return "", err
+	}
+	if exists {
+		arn, err := awsField[string](data, "Arn")
+		if err != nil || account != selected.Account || !strings.HasPrefix(arn, "arn:aws:sts::"+account+":assumed-role/"+selected.Role+"/") {
+			return "", errors.New("AWS profile no longer assumes the selected worker role")
+		}
+	}
 	return account, nil
+}
+
+func awsAuthSelect(dir, profile, role string) error {
+	if !awsProfileName.MatchString(profile) || !awsRoleName.MatchString(role) {
+		return errors.New("invalid AWS profile or role name")
+	}
+	previous, exists, err := awsSelectedAuth(dir)
+	if err != nil {
+		return err
+	}
+	if exists && (previous.Profile != profile || previous.Role != role) {
+		return errors.New("another AWS profile is already selected; inspect it before changing identities")
+	}
+	data, err := awsCallWithProfile(profile, "sts", "get-caller-identity")
+	if err != nil {
+		return err
+	}
+	account, accountErr := awsField[string](data, "Account")
+	arn, arnErr := awsField[string](data, "Arn")
+	if accountErr != nil || arnErr != nil || !awsAccountPattern.MatchString(account) || !strings.HasPrefix(arn, "arn:aws:sts::"+account+":assumed-role/"+role+"/") {
+		return errors.New("named AWS profile does not assume the expected worker role")
+	}
+	if exists && previous.Account != account {
+		return errors.New("named AWS profile changed accounts")
+	}
+	if _, err := os.Lstat(awsStatePath(dir)); err == nil {
+		content, readErr := privateRead(awsStatePath(dir), 16<<10)
+		var state awsState
+		if readErr != nil || json.Unmarshal(content, &state) != nil || state.Account != account || state.Region != awsRegion {
+			return errors.New("named AWS profile does not match the tracked worker")
+		}
+	} else if !os.IsNotExist(err) {
+		return errors.New("could not inspect tracked AWS worker")
+	}
+	if err := privateTree(dir); err != nil {
+		return err
+	}
+	selected := awsAuthSelection{Profile: profile, Role: role, Account: account}
+	content, err := json.Marshal(selected)
+	if err != nil {
+		return errors.New("could not encode AWS profile selection")
+	}
+	if err := writeAtomic(awsAuthPath(dir), append(content, '\n')); err != nil {
+		return err
+	}
+	fmt.Println("Dedicated AWS worker role verified and selected for Switchyard; OpenCode restart is not required")
+	return nil
 }
 
 func awsSave(dir string, state awsState) error {
@@ -170,6 +340,9 @@ func awsLoad(dir string) (awsState, error) {
 	if json.Unmarshal(content, &state) != nil || !awsAccountPattern.MatchString(state.Account) || state.Region != awsRegion || state.InstanceID != "" && !awsResourceID.MatchString(state.InstanceID) || state.GroupID != "" && !awsResourceID.MatchString(state.GroupID) {
 		return awsState{}, errors.New("invalid AWS worker state")
 	}
+	if (awsSlot(dir) == 1 && state.Slot != 0) || (awsSlot(dir) > 1 && (state.Slot != awsSlot(dir) || !idPattern.MatchString(state.LaunchToken))) {
+		return awsState{}, errors.New("tracked AWS worker belongs to another pool slot")
+	}
 	account, err := awsAccount()
 	if err != nil {
 		return awsState{}, err
@@ -181,7 +354,11 @@ func awsLoad(dir string) (awsState, error) {
 }
 
 func hasAWSTags(tags []awsTag) bool {
-	for _, expected := range awsTags {
+	return hasAWSTagsFor(tags, awsTags)
+}
+
+func hasAWSTagsFor(tags, expectedTags []awsTag) bool {
+	for _, expected := range expectedTags {
 		found := false
 		for _, actual := range tags {
 			if actual == expected {
@@ -213,6 +390,9 @@ func awsInstanceInfo(state awsState) (awsInstance, error) {
 	}
 	if len(matches) != 1 || matches[0].InstanceID != state.InstanceID || !hasAWSTags(matches[0].Tags) {
 		return awsInstance{}, errors.New("tracked worker instance does not match its tag")
+	}
+	if state.Slot > 1 && !hasAWSTagsFor(matches[0].Tags, []awsTag{{Key: "Slot", Value: strconv.Itoa(state.Slot)}, {Key: "LaunchToken", Value: state.LaunchToken}}) {
+		return awsInstance{}, errors.New("tracked worker belongs to another pool slot")
 	}
 	return matches[0], nil
 }
@@ -348,10 +528,15 @@ func awsConfigure(home, dir string, info awsInstance) error {
 	if err != nil {
 		return err
 	}
+	// New instances get a new identity; a stopped instance keeps its recorded
+	// identity when upsertAWSBackend updates its changed public address.
+	name := awsBackendName(dir)
+	digest := sha256.Sum256([]byte(info.InstanceID + "\x00" + name))
 	return upsertAWSBackend(home, backendConfig{
-		Name: "aws", Kind: "ssh", Root: awsRoot, Host: ip, User: "ubuntu",
+		Name: name, Kind: "ssh", Root: awsRoot, Host: ip, User: "ubuntu",
 		Identity: awsKeyPath(dir), KnownHosts: awsKnownPath(dir), HostKeyAlias: awsName,
-		Command: awsCommand, Priority: 10, Capabilities: []string{"cpu"},
+		Command: awsCommand, Priority: 9 + awsSlot(dir), Capabilities: []string{"cpu"},
+		ObservationID: "p" + hex.EncodeToString(digest[:15]),
 	})
 }
 
@@ -479,7 +664,7 @@ func awsLaunch(dir string) (awsState, error) {
 		return awsState{}, err
 	}
 	group, err := awsCall("ec2", "create-security-group", "--group-name", awsName,
-		"--description", "IP-restricted SSH for Compute Mesh worker", "--vpc-id", networks[0].VpcID,
+		"--description", "IP-restricted SSH for Switchyard worker", "--vpc-id", networks[0].VpcID,
 		"--tag-specifications", awsTagsJSON("security-group"))
 	if err != nil {
 		return awsState{}, err
@@ -605,7 +790,11 @@ func awsUp(home, dir string) error {
 	var state awsState
 	var err error
 	if os.IsNotExist(stateErr) {
-		state, err = awsLaunch(dir)
+		if awsSlot(dir) == 1 {
+			state, err = awsLaunch(dir)
+		} else {
+			state, err = awsLaunchPool(dir)
+		}
 	} else if stateErr == nil {
 		state, err = awsLoad(dir)
 	} else {
@@ -613,6 +802,12 @@ func awsUp(home, dir string) error {
 	}
 	if err != nil {
 		return err
+	}
+	if state.InstanceID == "" && state.Slot > 1 {
+		state, err = awsLaunchPool(dir)
+		if err != nil {
+			return err
+		}
 	}
 	info, err := awsInstanceInfo(state)
 	if err != nil {
@@ -686,12 +881,14 @@ func awsStatus(home, dir string) error {
 	if err != nil {
 		return err
 	}
-	ready := awsSSH(dir, ip, "test", "-f", "/var/lib/compute-mesh/ready")
+	ready := awsSSH(dir, ip, "test", "-f", "/var/lib/switchyard/ready")
 	installed := ready && awsSSH(dir, ip, "test", "-x", awsCommand)
 	podman := ready && awsSSH(dir, ip, "podman", "info")
 	docker := ready && !podman && awsSSH(dir, ip, "docker", "info")
-	imageReady := installed && awsSSH(dir, ip, awsCommand, "image", "status")
-	fmt.Printf("SSH host key verified; toolchain ready: %s; mesh installed: %s; rootless Podman ready: %s; legacy Docker ready: %s; pinned image ready: %s\n",
+	imageReady := installed && awsSSH(dir, ip, awsCommand, "image", "status") &&
+		awsSSH(dir, ip, "test", "-f", "/home/ubuntu/.local/bin/.switchyard-load-v2") &&
+		awsSSH(dir, ip, "test", "-x", "/usr/local/sbin/switchyard-safe-stop")
+	fmt.Printf("SSH host key verified; toolchain ready: %s; switchyard installed: %s; rootless Podman ready: %s; legacy Docker ready: %s; pinned image ready: %s\n",
 		awsBool(ready), awsBool(installed), awsBool(podman), awsBool(docker), awsBool(imageReady))
 	if imageReady {
 		return awsConfigure(home, dir, info)
@@ -700,10 +897,11 @@ func awsStatus(home, dir string) error {
 }
 
 func awsEnsurePodman(dir, ip string) error {
-	if !awsSSH(dir, ip, "systemctl", "is-active", "--quiet", "compute-mesh-stop.timer") {
+	if !awsSSH(dir, ip, "systemctl", "is-active", "--quiet", "switchyard-stop.timer") {
 		return errors.New("worker auto-stop timer is not active; stop the worker before continuing")
 	}
-	if awsSSH(dir, ip, "podman", "info") && awsSSH(dir, ip, "test", "-x", "/usr/bin/catatonit") {
+	if awsSSH(dir, ip, "podman", "info") && awsSSH(dir, ip, "test", "-x", "/usr/bin/catatonit") &&
+		awsSSH(dir, ip, "test", "-x", "/usr/local/sbin/switchyard-safe-stop") {
 		return nil
 	}
 	bootstrap, err := os.CreateTemp(dir, ".bootstrap-*")
@@ -718,7 +916,7 @@ func awsEnsurePodman(dir, ip string) error {
 	if err := bootstrap.Close(); err != nil {
 		return errors.New("could not finish rootless worker bootstrap")
 	}
-	remote := "/home/ubuntu/mesh-bootstrap.next"
+	remote := "/home/ubuntu/switchyard-bootstrap.next"
 	params := append([]string{"-B"}, awsSSHOptions(dir)...)
 	params = append(params, bootstrap.Name(), "ubuntu@"+ip+":"+remote)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
@@ -727,11 +925,16 @@ func awsEnsurePodman(dir, ip string) error {
 		return errors.New("could not transfer rootless worker bootstrap")
 	}
 	defer awsSSH(dir, ip, "rm", "-f", remote)
-	if !awsSSHWithin(dir, ip, 10*time.Minute, "sudo", "-n", "/usr/bin/bash", remote) {
+	bootstrapArgs := []string{"sudo", "-n", "/usr/bin/bash", remote}
+	if awsSSH(dir, ip, "podman", "info") && awsSSH(dir, ip, "test", "-x", "/usr/bin/catatonit") {
+		bootstrapArgs = append(bootstrapArgs, "--timer-only")
+	}
+	if !awsSSHWithin(dir, ip, 10*time.Minute, bootstrapArgs...) {
 		return errors.New("rootless worker bootstrap failed; check the worker's cloud-init and package logs")
 	}
 	if !awsSSH(dir, ip, "podman", "info") || !awsSSH(dir, ip, "test", "-x", "/usr/bin/catatonit") ||
-		!awsSSH(dir, ip, "systemctl", "is-active", "--quiet", "compute-mesh-stop.timer") {
+		!awsSSH(dir, ip, "test", "-x", "/usr/local/sbin/switchyard-safe-stop") ||
+		!awsSSH(dir, ip, "systemctl", "is-active", "--quiet", "switchyard-stop.timer") {
 		return errors.New("rootless Podman or the worker auto-stop timer is not ready")
 	}
 	return nil
@@ -760,7 +963,7 @@ func awsSetup(home, dir, source string) error {
 	if err != nil {
 		return err
 	}
-	if !awsSSH(dir, ip, "test", "-f", "/var/lib/compute-mesh/ready") {
+	if !awsSSH(dir, ip, "test", "-f", "/var/lib/switchyard/ready") {
 		return errors.New("worker toolchain is still bootstrapping")
 	}
 	if err := awsEnsurePodman(dir, ip); err != nil {
@@ -796,6 +999,7 @@ func awsSetup(home, dir, source string) error {
 		{"chmod", "755", "/home/ubuntu/switchyard.next"},
 		{"mv", "-f", "/home/ubuntu/switchyard.next", awsCommand},
 		{awsCommand, "worker", "--root", awsRoot, "init"},
+		{"touch", "/home/ubuntu/.local/bin/.switchyard-load-v2"},
 	} {
 		if !awsSSH(dir, ip, args...) {
 			return errors.New("could not install the Go worker binary")
@@ -813,9 +1017,6 @@ func awsSetup(home, dir, source string) error {
 	debugEvent("remote-image-build", "ok", imageBuildStart)
 	if err := awsConfigure(home, dir, info); err != nil {
 		return err
-	}
-	if !awsSSH(dir, ip, "rm", "-f", "/home/ubuntu/.local/bin/mesh-go") {
-		return errors.New("could not remove the old worker binary")
 	}
 	fmt.Println("Go worker installed; pinned SSH backend updated")
 	return nil
@@ -837,6 +1038,25 @@ func awsDown(dir string) error {
 	if info.State.Name != "running" {
 		return errors.New("AWS worker is not ready to stop")
 	}
+	lease, err := awsTryLease(awsPoolBase(dir), awsBackendName(dir))
+	if err != nil {
+		return err
+	}
+	if lease == nil {
+		return errors.New("AWS worker is occupied; refusing to stop")
+	}
+	defer lease.Close()
+	ip, err := awsAddress(info)
+	if err != nil {
+		return err
+	}
+	active, err := awsRemoteLoad(dir, ip)
+	if err != nil {
+		return err
+	}
+	if active != 0 {
+		return errors.New("AWS worker has active jobs; refusing to stop")
+	}
 	if _, err := awsCall("ec2", "stop-instances", "--instance-ids", state.InstanceID); err != nil {
 		return err
 	}
@@ -844,7 +1064,12 @@ func awsDown(dir string) error {
 	return nil
 }
 
-func awsDestroy(dir string) error {
+func awsDestroy(home, dir string) error {
+	if awsSlot(dir) == 1 {
+		if err := awsPoolDestroy(home, dir); err != nil {
+			return err
+		}
+	}
 	if _, err := os.Lstat(awsStatePath(dir)); os.IsNotExist(err) {
 		fmt.Println("No tracked AWS worker to destroy")
 		return nil
@@ -864,6 +1089,15 @@ func awsDestroy(dir string) error {
 			info.State.Name = "terminated"
 		}
 		if info.State.Name != "shutting-down" && info.State.Name != "terminated" {
+			if info.State.Name == "running" {
+				if err := awsDown(dir); err != nil {
+					return err
+				}
+				return errors.New("AWS worker stopping; retry destroy after it is stopped")
+			}
+			if info.State.Name != "stopped" {
+				return errors.New("AWS worker is still changing state")
+			}
 			if _, err := awsCall("ec2", "terminate-instances", "--instance-ids", state.InstanceID); err != nil {
 				return err
 			}
@@ -912,6 +1146,9 @@ func awsDestroy(dir string) error {
 			return err
 		}
 	}
+	if err := removeDestroyedAWSBackend(home, dir); err != nil {
+		return err
+	}
 	for _, path := range []string{awsKeyPath(dir), awsKeyPath(dir) + ".pub", awsKnownPath(dir), awsStatePath(dir)} {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			return errors.New("could not remove local AWS worker material")
@@ -923,11 +1160,84 @@ func awsDestroy(dir string) error {
 
 func runAWS(home string, args []string) int {
 	if len(args) == 0 {
-		return fail(errors.New("use aws up, setup, status, down or destroy"))
+		return fail(errors.New("use aws auth, up, setup, status, down or destroy"))
 	}
 	dir, err := awsDirectory()
 	if err != nil {
 		return fail(err)
+	}
+	if args[0] == "auth" {
+		switch {
+		case len(args) == 3 && args[1] == "select":
+			err = awsAuthSelect(dir, args[2], "SwitchyardWorker")
+		case len(args) == 5 && args[1] == "select" && args[3] == "--role":
+			err = awsAuthSelect(dir, args[2], args[4])
+		case len(args) == 2 && args[1] == "status":
+			var selected awsAuthSelection
+			var exists bool
+			selected, exists, err = awsSelectedAuth(dir)
+			if err == nil && !exists {
+				fmt.Println("No Switchyard AWS profile selected")
+				return 0
+			}
+			if err == nil {
+				_, err = awsAccount()
+				if err == nil {
+					fmt.Printf("Switchyard AWS profile %s assumes the selected worker role\n", selected.Profile)
+				}
+			}
+		default:
+			return fail(errors.New("use aws auth select PROFILE [--role ROLE] or aws auth status"))
+		}
+		if err != nil {
+			return fail(err)
+		}
+		return 0
+	}
+	if args[0] == "auto" {
+		if len(args) < 2 {
+			return fail(errors.New("use aws auto enable, status, tick or disable"))
+		}
+		switch args[1] {
+		case "enable":
+			flags := flag.NewFlagSet("aws auto enable", flag.ContinueOnError)
+			source := flags.String("source", "", "absolute Switchyard source path")
+			workers := flags.Int("max-workers", 1, "maximum London workers, 1..4")
+			if err := flags.Parse(args[2:]); err != nil || len(flags.Args()) != 0 {
+				return fail(errors.New("use aws auto enable --source ABSOLUTE_PATH [--max-workers 1..4]"))
+			}
+			self, err := os.Executable()
+			if err != nil {
+				return fail(errors.New("could not find the Switchyard executable"))
+			}
+			return awsResult(awsConfigureAuto(dir, self, *source, *workers))
+		case "status":
+			if len(args) != 2 {
+				return fail(errors.New("AWS auto status takes no extra arguments"))
+			}
+			config, enabled, err := awsAutoRead(dir)
+			if err != nil {
+				return fail(err)
+			}
+			if !enabled {
+				fmt.Println("AWS autoscaling disabled")
+			} else {
+				fmt.Printf("AWS autoscaling configured: max workers %d; idle stop after %d minutes\n", config.MaxWorkers, config.IdleAfter/60)
+			}
+			return 0
+		case "tick":
+			if len(args) != 2 {
+				return fail(errors.New("AWS auto tick takes no extra arguments"))
+			}
+			return awsResult(awsAutoTick(home, dir))
+		case "disable":
+			if len(args) != 2 {
+				return fail(errors.New("AWS auto disable takes no extra arguments"))
+			}
+			return awsResult(awsDisableAuto(dir))
+		default:
+			return fail(errors.New("use aws auto enable, status, tick or disable"))
+		}
 	}
 	source := "."
 	if args[0] == "up" || args[0] == "setup" {
@@ -943,15 +1253,45 @@ func runAWS(home string, args []string) int {
 	case "up":
 		err = awsUp(home, dir)
 	case "setup":
+		// Manual setup transfers and replaces the worker binary and image.
+		// Hold the same lease as dispatch and automatic reconciliation.
+		lease, leaseErr := awsTryLease(dir, "aws")
+		if leaseErr != nil {
+			return fail(leaseErr)
+		}
+		if lease == nil {
+			return fail(errors.New("AWS worker is occupied; retry setup after the active job completes"))
+		}
+		defer lease.Close()
 		err = awsSetup(home, dir, source)
 	case "status":
 		err = awsStatus(home, dir)
+		if err == nil {
+			err = awsPoolStatus(home, dir)
+		}
 	case "down":
-		err = awsDown(dir)
+		_, enabled, configErr := awsAutoRead(dir)
+		if configErr != nil {
+			return fail(configErr)
+		}
+		if enabled {
+			return fail(errors.New("disable AWS autoscaling before stopping workers manually"))
+		}
+		err = awsPoolDown(dir)
+		if err == nil {
+			err = awsDown(dir)
+		}
 	case "destroy":
-		err = awsDestroy(dir)
+		_, enabled, configErr := awsAutoRead(dir)
+		if configErr != nil {
+			return fail(configErr)
+		}
+		if enabled {
+			return fail(errors.New("disable AWS autoscaling before destroying workers"))
+		}
+		err = awsDestroy(home, dir)
 	default:
-		return fail(errors.New("use aws up, setup, status, down or destroy"))
+		return fail(errors.New("use aws auth, up, setup, status, down or destroy"))
 	}
 	if err != nil {
 		return fail(err)

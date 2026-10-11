@@ -3,9 +3,9 @@ package main
 import (
 	"os"
 
-	"github.com/BYK/switchyard/internal/mesh"
+	"github.com/BYK/switchyard/internal/switchyard"
 )
 
 func main() {
-	os.Exit(mesh.Main(os.Args[1:]))
+	os.Exit(switchyard.Main(os.Args[1:]))
 }

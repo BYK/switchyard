@@ -1,4 +1,4 @@
-package mesh
+package switchyard
 
 import (
 	"errors"
@@ -9,9 +9,9 @@ import (
 // Linux workers use Podman's local, daemonless runtime when it is installed.
 // Docker remains available for existing workers and local development.
 func containerRuntime() (string, error) {
-	selected := os.Getenv("MESH_CONTAINER_RUNTIME")
+	selected := os.Getenv("SWITCHYARD_CONTAINER_RUNTIME")
 	if selected != "" && selected != "podman" && selected != "docker" {
-		return "", errors.New("MESH_CONTAINER_RUNTIME must be podman or docker")
+		return "", errors.New("SWITCHYARD_CONTAINER_RUNTIME must be podman or docker")
 	}
 	if selected != "" {
 		if _, err := exec.LookPath(selected); err != nil {
