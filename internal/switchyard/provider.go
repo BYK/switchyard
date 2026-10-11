@@ -154,8 +154,9 @@ func removeDestroyedAWSBackend(home, dir string) error {
 	}
 	remaining := make([]backendConfig, 0, len(data.Backends))
 	removed := false
+	name := awsBackendName(dir)
 	for _, cfg := range data.Backends {
-		if cfg.Name != "aws" {
+		if cfg.Name != name {
 			remaining = append(remaining, cfg)
 			continue
 		}
@@ -203,7 +204,7 @@ func saveBackend(home string, cfg backendConfig) error {
 }
 
 func upsertAWSBackend(home string, cfg backendConfig) error {
-	if cfg.Name != "aws" {
+	if cfg.Name != "aws" && cfg.Name != "aws-2" && cfg.Name != "aws-3" && cfg.Name != "aws-4" {
 		return errors.New("invalid managed backend name")
 	}
 	if err := validateBackend(cfg); err != nil {

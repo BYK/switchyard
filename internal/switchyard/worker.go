@@ -331,6 +331,69 @@ func workerStatus(root, project, job string) (jobRecord, error) {
 	return record, nil
 }
 
+// A prepared job has no job.json until execution starts. Treat it as occupied,
+// and fail closed on invalid metadata: an idle stop must never interrupt work.
+func workerLoad(root string) (int, error) {
+	if err := workerReady(root); err != nil {
+		return 0, err
+	}
+	projects, err := os.ReadDir(filepath.Join(root, "projects"))
+	if err != nil || len(projects) > 4096 {
+		return 0, errors.New("could not inspect worker projects")
+	}
+	active, inspected := 0, 0
+	for _, project := range projects {
+		if !project.IsDir() || requireID(project.Name()) != nil {
+			return 0, errors.New("invalid worker project")
+		}
+		jobs, err := os.ReadDir(filepath.Join(root, "projects", project.Name(), "jobs"))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return 0, errors.New("could not inspect worker jobs")
+		}
+		inspected += len(jobs)
+		if inspected > 4096 {
+			return 0, errors.New("too many worker jobs to inspect")
+		}
+		for _, job := range jobs {
+			if !job.IsDir() || requireID(job.Name()) != nil {
+				return 0, errors.New("invalid worker job")
+			}
+			path := filepath.Join(root, "projects", project.Name(), "jobs", job.Name(), "job.json")
+			if _, err := os.Lstat(path); os.IsNotExist(err) {
+				active++
+				continue
+			} else if err != nil {
+				return 0, errors.New("could not inspect worker job")
+			}
+			record, err := workerStatus(root, project.Name(), job.Name())
+			if err != nil {
+				return 0, err
+			}
+			switch record.State {
+			case "finished", "setup-failed", "lost":
+				// The controller still retrieves logs and the patch after a
+				// process exits. Keep a recent result available through that
+				// transfer, including when the controller process crashes.
+				info, err := os.Lstat(path)
+				if err != nil || !info.Mode().IsRegular() {
+					return 0, errors.New("invalid worker job metadata")
+				}
+				if time.Since(info.ModTime()) < awsIdleWindow {
+					active++
+				}
+			case "starting", "running":
+				active++
+			default:
+				return 0, errors.New("unknown worker job state")
+			}
+		}
+	}
+	return active, nil
+}
+
 func workerCancel(root, project, job string) (jobRecord, error) {
 	record, err := workerStatus(root, project, job)
 	if err != nil || record.State != "running" {
@@ -851,6 +914,12 @@ func runWorker(root, action, project, job, snapshot, cwd string, argv, environme
 		return 0, initWorker(root)
 	case "ready":
 		return 0, workerReady(root)
+	case "load":
+		active, err := workerLoad(root)
+		if err == nil {
+			fmt.Println(active)
+		}
+		return 0, err
 	case "prepare":
 		return 0, workerPrepare(root, project, job)
 	case "execute":

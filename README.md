@@ -2,7 +2,7 @@
 
 Run a command on a prepared worker against one fixed snapshot of your local Git or Jujutsu worktree. Your project remote is never contacted. Each job gets a separate writable checkout, streams output, returns the command's exit status, and saves agent edits as a patch for review.
 
-This is a single-user CLI. It can manage one AWS London worker; it does not provide hosted accounts. The worker runs under a dedicated OS account on a machine you control. Use a separate worker for each trust boundary; arbitrary commands can access that account's files and network.
+This is a single-user CLI. It can manage up to four AWS London workers; it does not provide hosted accounts. Each worker runs under a dedicated OS account on a machine you control. Use a separate pool for each trust boundary; arbitrary commands can access that account's files and network.
 
 ## Install
 
@@ -29,7 +29,17 @@ switchyard aws status          # Confirm stopped
 switchyard aws destroy         # Only when finished permanently; repeat after termination until verified
 ```
 
-`switchyard aws up` creates or starts a tracked on-demand `m7i.xlarge` in AWS London on Ubuntu 24.04, with an encrypted 30-GB disk, IMDSv2, and SSH restricted to your current public IPv4 address. It compares the SSH host key to the EC2 console fingerprint, pins it, and refreshes the public IP after a restart. `aws setup` installs rootless Podman, checks the two-hour auto-stop timer, transfers the Go binary over pinned SSH, builds the pinned Node image on the worker, and registers the SSH backend. The timer can stop a long job. `aws down` stops compute billing; the disk remains billable until `aws destroy` completes. If startup is still in progress, use a delayed follow-up, not repeated dispatches. Never display account data, keys, or raw AWS error payloads.
+`switchyard aws up` creates or starts a tracked on-demand `m7i.xlarge` in AWS London on Ubuntu 24.04, with an encrypted 30-GB disk, IMDSv2, and SSH restricted to your current public IPv4 address. It compares the SSH host key to the EC2 console fingerprint, pins it, and refreshes the public IP after a restart. `aws setup` installs rootless Podman, an instance-side safe-stop timer, the Go worker binary, and the pinned Node image, then registers the SSH backend. The timer checks running and prepared jobs, recent results, and open SSH transfers before stopping a worker. `aws down` stops compute billing; disks remain billable until `aws destroy` completes. If startup is still in progress, use a delayed follow-up, not repeated dispatches. Never display account data, keys, or raw AWS error payloads.
+
+To wake stopped workers when there is measured demand and add workers when a worker is busy, install the current CLI and enable the user timer:
+
+```sh
+switchyard aws auto enable --source /home/byk/Code/switchyard --max-workers 4
+switchyard aws auto status
+switchyard aws status
+```
+
+The first measured offload after an idle period runs locally and requests a wake; it never waits for a cold worker in automatic mode. Explicit `--backend aws` or `aws-2` waits up to eight minutes for that slot. A free, ready worker runs one dispatched job at a time. When every ready AWS slot is occupied, a command runs locally and requests another worker, up to the configured maximum. Each worker stops after 15 minutes without a job, provided its remote load is zero. The instance-side timer also checks idle state in case the client stops running. Every additional worker has its own instance, 30-GB disk and pinned host key; the primary worker owns the shared SSH key and security group. A stopped instance still incurs disk charges. Before manually stopping or destroying the pool, run `switchyard aws auto disable`, then `aws down` or `aws destroy` and confirm `aws status` after each step. Destruction proceeds in stages; repeat only after AWS finishes a pending stop or termination. Inspect each worker's returned patch before applying it.
 
 For a manually managed worker, copy the same Go binary to that machine, initialize its private worker directory, and verify and pin its SSH host key before adding it:
 
@@ -71,7 +81,7 @@ switchyard preview --repo /absolute/project/path
 switchyard run --backend local --repo /absolute/project/path -- pnpm test
 ```
 
-The local backend does not offload CPU. A stopped remote worker takes time to start; Switchyard has no cold-start or under-ten-second guarantee.
+The local backend does not offload CPU. A stopped remote worker takes time to start; Switchyard has no cold-start or under-ten-second guarantee. Automatic wake is asynchronous, so that command stays local.
 
 ## DevPod
 
@@ -115,7 +125,7 @@ switchyard run --backend worker1 --repo /path/to/project -- go test ./...
 
 On Linux, an image-enabled worker uses **rootless Podman without a daemon** when Podman is installed. Docker workers still work; set `SWITCHYARD_CONTAINER_RUNTIME=docker` to choose them explicitly. The runtime and full image ID are recorded together so jobs never use an image ID from another runtime's storage. On a manually managed worker, install Podman, `catatonit` (needed for `--init`), `uidmap`, `passt`, and a working rootless user-namespace setup (or use Docker), then run `switchyard image build` and `switchyard image status` **as the worker account**. The build uses a digest-pinned Node 24 Debian base, installs pnpm 10.28.0 directly, and stores the finished image ID under that worker's private home. The tested Docker image uses about 0.34 GiB unpacked. GitHub's full hosted-runner VM recipe includes many unrelated SDKs and runtimes; its `ubuntu-slim` container recipe includes cloud CLIs but lacks Switchyard's pinned pnpm worker setup. Add other worker profiles when a measured project needs them. The build needs registry access during the first pull and build. Node jobs pin `"packageManager": "pnpm@10.28.0"` and a matching lockfile; npm jobs require `package-lock.json`. The worker binds each frozen checkout into a separate container; source changes never write back to the local worktree. Network access defaults to `none` for commands other than pnpm/npm setup; setup uses Docker bridge or rootless Podman's private `pasta` network. Set `SWITCHYARD_WORKER_NETWORK=none|bridge` on the worker to change that policy. Only a source snapshot and its returned patch cross hosts, not a mounted host filesystem or per-job OCI layer.
 
-The AWS lifecycle uses `switchyard aws up|status|setup|down|destroy`. New AWS workers bootstrap rootless Podman, `catatonit`, and a two-hour stop timer; `setup` transfers the Go binary over pinned SSH, builds the Node image **on the worker**, and registers its SSH backend. Always preview every selected and excluded path before dispatch, then stop the worker and confirm `switchyard aws status` says `stopped`; the disk remains billed until `destroy` confirms removal. On October 9 a freshly provisioned London worker ran an isolated job with invocation-time environment, exit 37, and an unapplied patch, then stopped. Permanent `destroy` still needs an independent end-to-end test.
+The AWS lifecycle uses `switchyard aws up|status|setup|down|destroy` and optional `aws auto enable|status|disable`. New AWS workers bootstrap rootless Podman, `catatonit`, and a two-hour safety timer that refuses to interrupt jobs or SSH transfers; `setup` transfers the Go binary over pinned SSH, builds the Node image **on the worker**, and registers its SSH backend. Always preview every selected and excluded path before dispatch, then confirm `switchyard aws status` shows each worker stopped; disks remain billed until `destroy` confirms removal. On October 9 a freshly provisioned London worker ran an isolated job with invocation-time environment, exit 37, and an unapplied patch, then stopped. Permanent `destroy` and the new autoscaling pool still need independent end-to-end tests.
 
 The SSH worker accepts requests on stdin, so commands containing quotes or spaces never enter the remote login shell's command line. SSH checks the pinned host key, refuses agent forwarding, and fails when the key changes. Local and SSH jobs both use the same source selection: tracked edits/deletions, non-ignored new files, and explicit `--include` inputs; `.env`, `.lore.md`, private keys, credentials and caches are excluded. `jj` file-list output is resolved from the worktree root, including when `--repo` points to another directory. One content-hashed manifest describes each frozen capture; the worker verifies every file before use. Independent runs receive different private checkouts. Worker edits return as an unapplied Git patch; sensitive paths created by the job are excluded from the patch. Commands get their exact exit status, logs have a 128-MiB cap and patches have a 64-MiB cap.
 

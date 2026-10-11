@@ -1,20 +1,36 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Install the bounded stop before doing any package downloads. Shutdown stops
-# the instance; the encrypted EBS root volume is still billed until destroy.
+# Install the bounded stop before doing any package downloads. A running or
+# prepared job must never be interrupted by this instance-side safety timer.
+cat > /usr/local/sbin/switchyard-safe-stop <<'GUARD'
+#!/usr/bin/env bash
+set -euo pipefail
+worker=/home/ubuntu/.local/bin/switchyard
+# Transfer and prepare have SSH traffic before a job appears in worker load.
+# Never shut down while an SSH connection may still be sending that job.
+connections=$(ss -Htn state established '( sport = :22 )') || exit 1
+[[ -z "$connections" ]] || exit 0
+if [ -x "$worker" ]; then
+    load=$(runuser -u ubuntu -- "$worker" worker --root /home/ubuntu/.local/share/switchyard/worker load) || exit 1
+    [ "$load" = 0 ] || exit 0
+fi
+exec /usr/sbin/shutdown -h now
+GUARD
+chmod 0755 /usr/local/sbin/switchyard-safe-stop
 cat > /etc/systemd/system/switchyard-stop.service <<'UNIT'
 [Unit]
 Description=Stop unattended Switchyard worker
 [Service]
 Type=oneshot
-ExecStart=/usr/sbin/shutdown -h now
+ExecStart=/usr/local/sbin/switchyard-safe-stop
 UNIT
 cat > /etc/systemd/system/switchyard-stop.timer <<'UNIT'
 [Unit]
 Description=Bound Switchyard worker uptime on every boot
 [Timer]
 OnBootSec=2h
+OnUnitInactiveSec=15min
 Unit=switchyard-stop.service
 [Install]
 WantedBy=timers.target
@@ -22,9 +38,13 @@ UNIT
 systemctl daemon-reload
 systemctl enable --now switchyard-stop.timer
 
+if [[ "${1:-}" == --timer-only ]]; then
+    exit 0
+fi
+
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq --no-install-recommends ca-certificates git rsync podman catatonit uidmap passt slirp4netns fuse-overlayfs
+apt-get install -y -qq --no-install-recommends ca-certificates git rsync podman catatonit uidmap passt slirp4netns fuse-overlayfs iproute2
 # The SSH user runs Podman directly in its own user namespace; no Docker
 # socket or persistent container daemon is exposed to jobs.
 # Cloud images differ in whether their default user already has subordinate

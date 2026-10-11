@@ -206,6 +206,14 @@ func observedReadyBackendAtPressure(home, self, signature string, busy bool) str
 			names = append(names, observedBackendID(provider))
 		}
 	}
+	if best := preferredObservedBackend(home, signature, names); best != "" {
+		for _, provider := range providers {
+			if observedBackendID(provider) == best && isAWSWorker(provider.Name()) && !provider.Ready(context.Background()) {
+				awsRequestWake()
+				break
+			}
+		}
+	}
 	for len(names) > 0 {
 		best := preferredObservedBackend(home, signature, names)
 		if best == "" {
@@ -213,6 +221,22 @@ func observedReadyBackendAtPressure(home, self, signature string, busy bool) str
 		}
 		for _, provider := range providers {
 			if observedBackendID(provider) == best && provider.Ready(context.Background()) {
+				if isAWSWorker(provider.Name()) {
+					free, err := awsWorkerAvailable(provider.Name())
+					if err != nil || !free {
+						if err == nil {
+							awsRequestScale()
+						}
+						for _, other := range providers {
+							if isAWSWorker(other.Name()) && supports(other.cfg, []string{"cpu"}) && other.Ready(context.Background()) {
+								if available, err := awsWorkerAvailable(other.Name()); err == nil && available {
+									return other.Name()
+								}
+							}
+						}
+						continue
+					}
+				}
 				return provider.Name()
 			}
 		}

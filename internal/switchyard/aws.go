@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net"
@@ -39,18 +40,22 @@ type awsTag struct {
 var awsTags = []awsTag{{Key: "Name", Value: awsName}, {Key: "Purpose", Value: "switchyard-single-worker"}}
 
 type awsState struct {
-	Account    string  `json:"account"`
-	Region     string  `json:"region"`
-	CreatedAt  float64 `json:"created_at"`
-	InstanceID string  `json:"instance_id,omitempty"`
-	GroupID    string  `json:"group_id,omitempty"`
-	KeyName    string  `json:"key_name,omitempty"`
-	ClientIP   string  `json:"client_ip,omitempty"`
+	Account     string  `json:"account"`
+	Region      string  `json:"region"`
+	CreatedAt   float64 `json:"created_at"`
+	InstanceID  string  `json:"instance_id,omitempty"`
+	GroupID     string  `json:"group_id,omitempty"`
+	KeyName     string  `json:"key_name,omitempty"`
+	ClientIP    string  `json:"client_ip,omitempty"`
+	Slot        int     `json:"slot,omitempty"`
+	LaunchToken string  `json:"launch_token,omitempty"`
 }
 
 type awsInstance struct {
 	InstanceID      string                `json:"InstanceId"`
 	PublicIPAddress string                `json:"PublicIpAddress"`
+	ImageID         string                `json:"ImageId"`
+	SubnetID        string                `json:"SubnetId"`
 	State           struct{ Name string } `json:"State"`
 	Tags            []awsTag              `json:"Tags"`
 }
@@ -85,6 +90,36 @@ func awsDirectory() (string, error) {
 }
 
 func awsStatePath(dir string) string { return filepath.Join(dir, "state.json") }
+
+func awsPoolDir(base string, slot int) string {
+	if slot == 1 {
+		return base
+	}
+	return filepath.Join(base, "pool", strconv.Itoa(slot))
+}
+
+func awsSlot(dir string) int {
+	if filepath.Base(filepath.Dir(dir)) == "pool" {
+		if value, err := strconv.Atoi(filepath.Base(dir)); err == nil && value >= 2 && value <= 4 {
+			return value
+		}
+	}
+	return 1
+}
+
+func awsBackendName(dir string) string {
+	if slot := awsSlot(dir); slot != 1 {
+		return "aws-" + strconv.Itoa(slot)
+	}
+	return "aws"
+}
+
+func awsPoolBase(dir string) string {
+	if awsSlot(dir) > 1 {
+		return filepath.Dir(filepath.Dir(dir))
+	}
+	return dir
+}
 func awsKeyPath(dir string) string   { return filepath.Join(dir, "worker-key") }
 func awsKnownPath(dir string) string { return filepath.Join(dir, "known_hosts") }
 
@@ -305,6 +340,9 @@ func awsLoad(dir string) (awsState, error) {
 	if json.Unmarshal(content, &state) != nil || !awsAccountPattern.MatchString(state.Account) || state.Region != awsRegion || state.InstanceID != "" && !awsResourceID.MatchString(state.InstanceID) || state.GroupID != "" && !awsResourceID.MatchString(state.GroupID) {
 		return awsState{}, errors.New("invalid AWS worker state")
 	}
+	if (awsSlot(dir) == 1 && state.Slot != 0) || (awsSlot(dir) > 1 && (state.Slot != awsSlot(dir) || !idPattern.MatchString(state.LaunchToken))) {
+		return awsState{}, errors.New("tracked AWS worker belongs to another pool slot")
+	}
 	account, err := awsAccount()
 	if err != nil {
 		return awsState{}, err
@@ -316,7 +354,11 @@ func awsLoad(dir string) (awsState, error) {
 }
 
 func hasAWSTags(tags []awsTag) bool {
-	for _, expected := range awsTags {
+	return hasAWSTagsFor(tags, awsTags)
+}
+
+func hasAWSTagsFor(tags, expectedTags []awsTag) bool {
+	for _, expected := range expectedTags {
 		found := false
 		for _, actual := range tags {
 			if actual == expected {
@@ -348,6 +390,9 @@ func awsInstanceInfo(state awsState) (awsInstance, error) {
 	}
 	if len(matches) != 1 || matches[0].InstanceID != state.InstanceID || !hasAWSTags(matches[0].Tags) {
 		return awsInstance{}, errors.New("tracked worker instance does not match its tag")
+	}
+	if state.Slot > 1 && !hasAWSTagsFor(matches[0].Tags, []awsTag{{Key: "Slot", Value: strconv.Itoa(state.Slot)}, {Key: "LaunchToken", Value: state.LaunchToken}}) {
+		return awsInstance{}, errors.New("tracked worker belongs to another pool slot")
 	}
 	return matches[0], nil
 }
@@ -485,11 +530,12 @@ func awsConfigure(home, dir string, info awsInstance) error {
 	}
 	// New instances get a new identity; a stopped instance keeps its recorded
 	// identity when upsertAWSBackend updates its changed public address.
-	digest := sha256.Sum256([]byte(info.InstanceID + "\x00" + awsName))
+	name := awsBackendName(dir)
+	digest := sha256.Sum256([]byte(info.InstanceID + "\x00" + name))
 	return upsertAWSBackend(home, backendConfig{
-		Name: "aws", Kind: "ssh", Root: awsRoot, Host: ip, User: "ubuntu",
+		Name: name, Kind: "ssh", Root: awsRoot, Host: ip, User: "ubuntu",
 		Identity: awsKeyPath(dir), KnownHosts: awsKnownPath(dir), HostKeyAlias: awsName,
-		Command: awsCommand, Priority: 10, Capabilities: []string{"cpu"},
+		Command: awsCommand, Priority: 9 + awsSlot(dir), Capabilities: []string{"cpu"},
 		ObservationID: "p" + hex.EncodeToString(digest[:15]),
 	})
 }
@@ -744,7 +790,11 @@ func awsUp(home, dir string) error {
 	var state awsState
 	var err error
 	if os.IsNotExist(stateErr) {
-		state, err = awsLaunch(dir)
+		if awsSlot(dir) == 1 {
+			state, err = awsLaunch(dir)
+		} else {
+			state, err = awsLaunchPool(dir)
+		}
 	} else if stateErr == nil {
 		state, err = awsLoad(dir)
 	} else {
@@ -752,6 +802,12 @@ func awsUp(home, dir string) error {
 	}
 	if err != nil {
 		return err
+	}
+	if state.InstanceID == "" && state.Slot > 1 {
+		state, err = awsLaunchPool(dir)
+		if err != nil {
+			return err
+		}
 	}
 	info, err := awsInstanceInfo(state)
 	if err != nil {
@@ -829,7 +885,9 @@ func awsStatus(home, dir string) error {
 	installed := ready && awsSSH(dir, ip, "test", "-x", awsCommand)
 	podman := ready && awsSSH(dir, ip, "podman", "info")
 	docker := ready && !podman && awsSSH(dir, ip, "docker", "info")
-	imageReady := installed && awsSSH(dir, ip, awsCommand, "image", "status")
+	imageReady := installed && awsSSH(dir, ip, awsCommand, "image", "status") &&
+		awsSSH(dir, ip, "test", "-f", "/home/ubuntu/.local/bin/.switchyard-load-v2") &&
+		awsSSH(dir, ip, "test", "-x", "/usr/local/sbin/switchyard-safe-stop")
 	fmt.Printf("SSH host key verified; toolchain ready: %s; switchyard installed: %s; rootless Podman ready: %s; legacy Docker ready: %s; pinned image ready: %s\n",
 		awsBool(ready), awsBool(installed), awsBool(podman), awsBool(docker), awsBool(imageReady))
 	if imageReady {
@@ -842,7 +900,8 @@ func awsEnsurePodman(dir, ip string) error {
 	if !awsSSH(dir, ip, "systemctl", "is-active", "--quiet", "switchyard-stop.timer") {
 		return errors.New("worker auto-stop timer is not active; stop the worker before continuing")
 	}
-	if awsSSH(dir, ip, "podman", "info") && awsSSH(dir, ip, "test", "-x", "/usr/bin/catatonit") {
+	if awsSSH(dir, ip, "podman", "info") && awsSSH(dir, ip, "test", "-x", "/usr/bin/catatonit") &&
+		awsSSH(dir, ip, "test", "-x", "/usr/local/sbin/switchyard-safe-stop") {
 		return nil
 	}
 	bootstrap, err := os.CreateTemp(dir, ".bootstrap-*")
@@ -866,10 +925,15 @@ func awsEnsurePodman(dir, ip string) error {
 		return errors.New("could not transfer rootless worker bootstrap")
 	}
 	defer awsSSH(dir, ip, "rm", "-f", remote)
-	if !awsSSHWithin(dir, ip, 10*time.Minute, "sudo", "-n", "/usr/bin/bash", remote) {
+	bootstrapArgs := []string{"sudo", "-n", "/usr/bin/bash", remote}
+	if awsSSH(dir, ip, "podman", "info") && awsSSH(dir, ip, "test", "-x", "/usr/bin/catatonit") {
+		bootstrapArgs = append(bootstrapArgs, "--timer-only")
+	}
+	if !awsSSHWithin(dir, ip, 10*time.Minute, bootstrapArgs...) {
 		return errors.New("rootless worker bootstrap failed; check the worker's cloud-init and package logs")
 	}
 	if !awsSSH(dir, ip, "podman", "info") || !awsSSH(dir, ip, "test", "-x", "/usr/bin/catatonit") ||
+		!awsSSH(dir, ip, "test", "-x", "/usr/local/sbin/switchyard-safe-stop") ||
 		!awsSSH(dir, ip, "systemctl", "is-active", "--quiet", "switchyard-stop.timer") {
 		return errors.New("rootless Podman or the worker auto-stop timer is not ready")
 	}
@@ -935,6 +999,7 @@ func awsSetup(home, dir, source string) error {
 		{"chmod", "755", "/home/ubuntu/switchyard.next"},
 		{"mv", "-f", "/home/ubuntu/switchyard.next", awsCommand},
 		{awsCommand, "worker", "--root", awsRoot, "init"},
+		{"touch", "/home/ubuntu/.local/bin/.switchyard-load-v2"},
 	} {
 		if !awsSSH(dir, ip, args...) {
 			return errors.New("could not install the Go worker binary")
@@ -973,6 +1038,25 @@ func awsDown(dir string) error {
 	if info.State.Name != "running" {
 		return errors.New("AWS worker is not ready to stop")
 	}
+	lease, err := awsTryLease(awsPoolBase(dir), awsBackendName(dir))
+	if err != nil {
+		return err
+	}
+	if lease == nil {
+		return errors.New("AWS worker is occupied; refusing to stop")
+	}
+	defer lease.Close()
+	ip, err := awsAddress(info)
+	if err != nil {
+		return err
+	}
+	active, err := awsRemoteLoad(dir, ip)
+	if err != nil {
+		return err
+	}
+	if active != 0 {
+		return errors.New("AWS worker has active jobs; refusing to stop")
+	}
 	if _, err := awsCall("ec2", "stop-instances", "--instance-ids", state.InstanceID); err != nil {
 		return err
 	}
@@ -981,6 +1065,11 @@ func awsDown(dir string) error {
 }
 
 func awsDestroy(home, dir string) error {
+	if awsSlot(dir) == 1 {
+		if err := awsPoolDestroy(home, dir); err != nil {
+			return err
+		}
+	}
 	if _, err := os.Lstat(awsStatePath(dir)); os.IsNotExist(err) {
 		fmt.Println("No tracked AWS worker to destroy")
 		return nil
@@ -1000,6 +1089,15 @@ func awsDestroy(home, dir string) error {
 			info.State.Name = "terminated"
 		}
 		if info.State.Name != "shutting-down" && info.State.Name != "terminated" {
+			if info.State.Name == "running" {
+				if err := awsDown(dir); err != nil {
+					return err
+				}
+				return errors.New("AWS worker stopping; retry destroy after it is stopped")
+			}
+			if info.State.Name != "stopped" {
+				return errors.New("AWS worker is still changing state")
+			}
 			if _, err := awsCall("ec2", "terminate-instances", "--instance-ids", state.InstanceID); err != nil {
 				return err
 			}
@@ -1096,6 +1194,51 @@ func runAWS(home string, args []string) int {
 		}
 		return 0
 	}
+	if args[0] == "auto" {
+		if len(args) < 2 {
+			return fail(errors.New("use aws auto enable, status, tick or disable"))
+		}
+		switch args[1] {
+		case "enable":
+			flags := flag.NewFlagSet("aws auto enable", flag.ContinueOnError)
+			source := flags.String("source", "", "absolute Switchyard source path")
+			workers := flags.Int("max-workers", 1, "maximum London workers, 1..4")
+			if err := flags.Parse(args[2:]); err != nil || len(flags.Args()) != 0 {
+				return fail(errors.New("use aws auto enable --source ABSOLUTE_PATH [--max-workers 1..4]"))
+			}
+			self, err := os.Executable()
+			if err != nil {
+				return fail(errors.New("could not find the Switchyard executable"))
+			}
+			return awsResult(awsConfigureAuto(dir, self, *source, *workers))
+		case "status":
+			if len(args) != 2 {
+				return fail(errors.New("AWS auto status takes no extra arguments"))
+			}
+			config, enabled, err := awsAutoRead(dir)
+			if err != nil {
+				return fail(err)
+			}
+			if !enabled {
+				fmt.Println("AWS autoscaling disabled")
+			} else {
+				fmt.Printf("AWS autoscaling configured: max workers %d; idle stop after %d minutes\n", config.MaxWorkers, config.IdleAfter/60)
+			}
+			return 0
+		case "tick":
+			if len(args) != 2 {
+				return fail(errors.New("AWS auto tick takes no extra arguments"))
+			}
+			return awsResult(awsAutoTick(home, dir))
+		case "disable":
+			if len(args) != 2 {
+				return fail(errors.New("AWS auto disable takes no extra arguments"))
+			}
+			return awsResult(awsDisableAuto(dir))
+		default:
+			return fail(errors.New("use aws auto enable, status, tick or disable"))
+		}
+	}
 	source := "."
 	if args[0] == "up" || args[0] == "setup" {
 		if len(args) == 3 && args[1] == "--source" {
@@ -1110,12 +1253,42 @@ func runAWS(home string, args []string) int {
 	case "up":
 		err = awsUp(home, dir)
 	case "setup":
+		// Manual setup transfers and replaces the worker binary and image.
+		// Hold the same lease as dispatch and automatic reconciliation.
+		lease, leaseErr := awsTryLease(dir, "aws")
+		if leaseErr != nil {
+			return fail(leaseErr)
+		}
+		if lease == nil {
+			return fail(errors.New("AWS worker is occupied; retry setup after the active job completes"))
+		}
+		defer lease.Close()
 		err = awsSetup(home, dir, source)
 	case "status":
 		err = awsStatus(home, dir)
+		if err == nil {
+			err = awsPoolStatus(home, dir)
+		}
 	case "down":
-		err = awsDown(dir)
+		_, enabled, configErr := awsAutoRead(dir)
+		if configErr != nil {
+			return fail(configErr)
+		}
+		if enabled {
+			return fail(errors.New("disable AWS autoscaling before stopping workers manually"))
+		}
+		err = awsPoolDown(dir)
+		if err == nil {
+			err = awsDown(dir)
+		}
 	case "destroy":
+		_, enabled, configErr := awsAutoRead(dir)
+		if configErr != nil {
+			return fail(configErr)
+		}
+		if enabled {
+			return fail(errors.New("disable AWS autoscaling before destroying workers"))
+		}
 		err = awsDestroy(home, dir)
 	default:
 		return fail(errors.New("use aws auth, up, setup, status, down or destroy"))

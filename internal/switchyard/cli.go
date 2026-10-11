@@ -151,7 +151,20 @@ func selectProvider(ctx context.Context, home, self, requested string, required 
 	if requested != "auto" {
 		provider, err := currentBackend(home, self, requested)
 		if err != nil {
-			return shellProvider{}, "", err
+			if !isAWSWorker(requested) {
+				return shellProvider{}, "", err
+			}
+			dir, dirErr := awsDirectory()
+			if dirErr != nil {
+				return shellProvider{}, "", dirErr
+			}
+			if waitErr := awsWaitReady(ctx, home, self, requested, dir); waitErr != nil {
+				return shellProvider{}, "", waitErr
+			}
+			provider, err = currentBackend(home, self, requested)
+			if err != nil {
+				return shellProvider{}, "", err
+			}
 		}
 		if !supports(provider.cfg, required) {
 			return shellProvider{}, "", errors.New("backend does not advertise the required capabilities")
@@ -161,7 +174,20 @@ func selectProvider(ctx context.Context, home, self, requested string, required 
 				return shellProvider{}, "", err
 			}
 		} else if !provider.Ready(ctx) {
-			return shellProvider{}, "", errors.New("requested backend is not ready")
+			if !isAWSWorker(requested) {
+				return shellProvider{}, "", errors.New("requested backend is not ready")
+			}
+			dir, err := awsDirectory()
+			if err != nil {
+				return shellProvider{}, "", err
+			}
+			if err := awsWaitReady(ctx, home, self, requested, dir); err != nil {
+				return shellProvider{}, "", err
+			}
+			provider, err = currentBackend(home, self, requested)
+			if err != nil {
+				return shellProvider{}, "", err
+			}
 		}
 		return provider, "explicit backend", nil
 	}
@@ -184,8 +210,21 @@ func selectProviderAtPressure(ctx context.Context, home, self string, required [
 		}
 		for _, provider := range list {
 			if provider.cfg.Kind != "local" && supports(provider.cfg, required) && provider.Ready(ctx) {
+				if isAWSWorker(provider.Name()) {
+					available, err := awsWorkerAvailable(provider.Name())
+					if err != nil {
+						return shellProvider{}, "", err
+					}
+					if !available {
+						awsRequestScale()
+						continue
+					}
+				}
 				return provider, reason, nil
 			}
+		}
+		if busy {
+			awsRequestWake()
 		}
 		if !supports(local.cfg, required) {
 			return shellProvider{}, "", errors.New("no ready backend supports the required capabilities")
@@ -298,6 +337,42 @@ func executeJob(home, self, start, backend string, includes, required []string, 
 	provider, reason, err := selectProvider(context.Background(), home, self, backend, required)
 	if err != nil {
 		return fail(err)
+	}
+	if isAWSWorker(provider.Name()) {
+		dir, dirErr := awsDirectory()
+		if dirErr != nil {
+			return fail(dirErr)
+		}
+		lease, leaseErr := awsTryLease(dir, provider.Name())
+		if leaseErr != nil {
+			return fail(leaseErr)
+		}
+		if lease == nil {
+			awsRequestScale()
+			if backend != "auto" && !(os.Getenv("SWITCHYARD_TRACE_HANDOFF") == "1" && os.Getenv("SWITCHYARD_BACKEND") == "auto") {
+				return fail(errors.New("AWS worker is occupied; retry after the active job completes"))
+			}
+			provider, leaseErr = currentBackend(home, self, "local")
+			if leaseErr != nil {
+				return fail(leaseErr)
+			}
+			if leaseErr = initWorker(provider.cfg.Root); leaseErr != nil {
+				return fail(leaseErr)
+			}
+			reason = "AWS worker occupied; using local worker"
+		} else {
+			defer lease.Close()
+			if err := awsNoteWorkerUse(dir, provider.Name()); err != nil {
+				return fail(err)
+			}
+			// This runs before lease.Close, so idle reconciliation sees the new
+			// idle timestamp only after this dispatch has fully completed.
+			defer func() {
+				if err := awsNoteWorkerUse(dir, provider.Name()); err != nil {
+					fmt.Fprintln(os.Stderr, "switchyard: AWS worker activity could not be saved")
+				}
+			}()
+		}
 	}
 	if proxy && provider.Name() == "local" {
 		path, err := exec.LookPath(argv[0])
@@ -531,8 +606,10 @@ func printHelp() {
 	fmt.Println("  switchyard image build|status       (pinned Node image in the selected Linux runtime)")
 	fmt.Println("  switchyard aws auth select PROFILE [--role ROLE] | auth status")
 	fmt.Println("  switchyard aws up|status|setup|down|destroy [--source PATH]")
+	fmt.Println("  switchyard aws auto enable --source ABSOLUTE_PATH [--max-workers 1..4]")
+	fmt.Println("  switchyard aws auto status|tick|disable")
 	fmt.Println("  switchyard container status|stop [--cwd PATH]   (opt-in CWD sandbox)")
-	fmt.Println("  switchyard worker --root PATH init|ready|prepare|execute|status|logs|patch|cancel")
+	fmt.Println("  switchyard worker --root PATH init|ready|load|prepare|execute|status|logs|patch|cancel")
 }
 
 func Main(args []string) int {
