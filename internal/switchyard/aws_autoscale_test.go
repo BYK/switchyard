@@ -132,3 +132,16 @@ func TestAWSPoolRecoveryRejectsForeignSlot(t *testing.T) {
 		t.Fatalf("owned interrupted launch must be found: %+v, %v", found, err)
 	}
 }
+
+func TestAWSAutoUnitUsesSelectedStateDirectories(t *testing.T) {
+	unit := awsAutoUnit("/opt/switchyard", "/home/user/state", "/home/user/worker", "tick")
+	for _, setting := range []string{
+		"Environment=SWITCHYARD_HOME=/home/user/state\n",
+		"Environment=SWITCHYARD_AWS_HOME=/home/user/worker\n",
+		"ExecStart=/opt/switchyard aws auto tick\n",
+	} {
+		if !strings.Contains(unit, setting) {
+			t.Fatalf("service missing %q", setting)
+		}
+	}
+}

@@ -401,15 +401,17 @@ func awsWaitReady(ctx context.Context, home, self, name, dir string) error {
 	}
 }
 
-func awsAutoUnit(self, action string) string {
-	return "# Managed by Switchyard AWS autoscale\n[Unit]\nDescription=Reconcile Switchyard AWS workers\n[Service]\nType=oneshot\nTimeoutStartSec=15min\nExecStart=" + self + " aws auto " + action + "\n"
+func awsAutoUnit(self, home, workerDir, action string) string {
+	return "# Managed by Switchyard AWS autoscale\n[Unit]\nDescription=Reconcile Switchyard AWS workers\n[Service]\nType=oneshot\nTimeoutStartSec=15min\nEnvironment=SWITCHYARD_HOME=" + home + "\nEnvironment=SWITCHYARD_AWS_HOME=" + workerDir + "\nExecStart=" + self + " aws auto " + action + "\n"
 }
 
 const awsAutoTimer = "# Managed by Switchyard AWS autoscale\n[Unit]\nDescription=Check Switchyard AWS worker demand and idle time\n[Timer]\nOnBootSec=1min\nOnUnitInactiveSec=1min\nUnit=switchyard-autoscale.service\n[Install]\nWantedBy=timers.target\n"
 
-func awsInstallAutoUnits(self string) error {
-	if !filepath.IsAbs(self) || strings.ContainsAny(self, " \n\r\t\\%'\"") {
-		return errors.New("Switchyard executable path contains unsupported systemd unit characters")
+func awsInstallAutoUnits(self, dataDir, workerDir string) error {
+	for _, value := range []string{self, dataDir, workerDir} {
+		if !filepath.IsAbs(value) || strings.ContainsAny(value, " \n\r\t\\%'\"") {
+			return errors.New("Switchyard executable or state path contains unsupported systemd unit characters")
+		}
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -420,7 +422,7 @@ func awsInstallAutoUnits(self string) error {
 		return err
 	}
 	for name, content := range map[string]string{
-		"switchyard-autoscale.service": awsAutoUnit(self, "tick"),
+		"switchyard-autoscale.service": awsAutoUnit(self, dataDir, workerDir, "tick"),
 		"switchyard-autoscale.timer":   awsAutoTimer,
 	} {
 		path := filepath.Join(dir, name)
@@ -457,9 +459,18 @@ func awsConfigureAuto(dir, self, source string, maxWorkers int) error {
 	if err := privateTree(dir); err != nil {
 		return err
 	}
+	home, err := dataHome()
+	if err != nil {
+		return err
+	}
 	config := awsAutoConfig{Source: source, MaxWorkers: maxWorkers, IdleAfter: int(awsIdleWindow.Seconds())}
 	content, err := json.Marshal(config)
 	if err != nil {
+		return err
+	}
+	// Install the timer before advertising autoscaling as enabled. A failed
+	// systemd setup must never leave dispatch waiting for a dead reconciler.
+	if err := awsInstallAutoUnits(self, home, dir); err != nil {
 		return err
 	}
 	if err := writeAtomic(awsAutoPath(dir), append(content, '\n')); err != nil {
@@ -468,7 +479,7 @@ func awsConfigureAuto(dir, self, source string, maxWorkers int) error {
 	if err := awsNoteActivity(dir, false); err != nil {
 		return err
 	}
-	return awsInstallAutoUnits(self)
+	return nil
 }
 
 func awsDisableAuto(dir string) error {
