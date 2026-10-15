@@ -1,7 +1,9 @@
 package switchyard
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,6 +37,124 @@ func TestAWSWorkerLeasesAreExclusivePerSlot(t *testing.T) {
 		t.Fatalf("released worker should become available: %v", err)
 	}
 	second.Close()
+}
+
+func TestAWSAutoEnvironmentResolvesPrivateRuntime(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	original := []string{"PATH=/test/bin", "XDG_RUNTIME_DIR=", "UNRELATED=preserved"}
+	resolved := awsAutoEnvironment(original, dir)
+	if strings.Join(resolved, "\n") != "PATH=/test/bin\nUNRELATED=preserved\nXDG_RUNTIME_DIR="+dir {
+		t.Fatalf("missing private user-bus environment: %v", resolved)
+	}
+	if original[1] != "XDG_RUNTIME_DIR=" || len(original) != 3 {
+		t.Fatal("resolving the bus changed the invocation environment")
+	}
+	for _, explicit := range []string{"XDG_RUNTIME_DIR=/chosen/runtime", "DBUS_SESSION_BUS_ADDRESS=unix:path=/chosen/bus"} {
+		configured := []string{"PATH=/test/bin", explicit}
+		if !equalPaths(awsAutoEnvironment(configured, dir), configured) {
+			t.Fatalf("explicit bus environment was replaced: %s", explicit)
+		}
+	}
+}
+
+func TestAWSAutoEnvironmentRejectsUnsafeRuntime(t *testing.T) {
+	private := t.TempDir()
+	shared := t.TempDir()
+	if err := os.Chmod(shared, 0755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "runtime-link")
+	if err := os.Symlink(private, link); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(private, "regular-file")
+	if err := os.WriteFile(file, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	original := []string{"PATH=/test/bin"}
+	for _, dir := range []string{shared, link, file, filepath.Join(private, "missing")} {
+		if !equalPaths(awsAutoEnvironment(original, dir), original) {
+			t.Fatal("inferred a bus from an unsafe runtime directory")
+		}
+	}
+}
+
+func TestAutomaticAWSPlacementKeepsUnavailableToolchainsNative(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, "aws-worker")
+	t.Setenv("SWITCHYARD_HOME", home)
+	t.Setenv("SWITCHYARD_AWS_HOME", dir)
+	if err := privateTree(dir); err != nil {
+		t.Fatal(err)
+	}
+	config, err := json.Marshal(awsAutoConfig{Source: home, MaxWorkers: 1, IdleAfter: int(awsIdleWindow.Seconds())})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeAtomic(awsAutoPath(dir), config); err != nil {
+		t.Fatal(err)
+	}
+	tools := filepath.Join(home, "tools")
+	if err := os.Mkdir(tools, 0700); err != nil {
+		t.Fatal(err)
+	}
+	readyMarker, wakeMarker := filepath.Join(home, "ready-called"), filepath.Join(home, "wake-called")
+	adapter := filepath.Join(tools, "worker-adapter")
+	if err := os.WriteFile(adapter, []byte(fmt.Sprintf("#!/bin/sh\n: > %q\nexit 1\n", readyMarker)), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tools, "systemctl"), []byte(fmt.Sprintf("#!/bin/sh\n: > %q\n", wakeMarker)), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", tools+":"+os.Getenv("PATH"))
+	if err := saveBackend(home, backendConfig{Name: "aws", Kind: "plugin", Root: filepath.Join(home, "managed-worker"), Command: adapter}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range []string{"go", "cargo", "pytest", "uv", "make"} {
+		request := placementCommand{Directory: home, Argv: []string{tool}}
+		provider, _, err := selectProviderAtPressure(context.Background(), home, os.Args[0], []string{"cpu"}, true, "CPU contention", request)
+		if err != nil || provider.Name() != "local" {
+			t.Fatalf("unsupported managed-worker tool did not stay local: %s, %v", tool, err)
+		}
+		if name := pressureReadyBackendAtPressure(home, os.Args[0], true, request); name != "" {
+			t.Fatalf("traced unsupported managed-worker tool selected a remote: %s", tool)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(home, "package.json"), []byte(`{"packageManager":"pnpm@10.27.0"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "pnpm-lock.yaml"), []byte("lockfileVersion: '9.0'\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	request := placementCommand{Directory: home, Argv: []string{"pnpm", "test"}}
+	if _, _, err := selectProviderAtPressure(context.Background(), home, os.Args[0], []string{"cpu"}, true, "CPU contention", request); err != nil {
+		t.Fatal(err)
+	}
+	if name := pressureReadyBackendAtPressure(home, os.Args[0], true, request); name != "" {
+		t.Fatal("an incompatible pnpm pin selected the managed worker")
+	}
+	for _, marker := range []string{readyMarker, wakeMarker} {
+		if _, err := os.Stat(marker); !os.IsNotExist(err) {
+			t.Fatal("unsupported toolchain probed or woke the managed Node worker")
+		}
+	}
+	if _, err := os.Stat(awsActivityPath(dir)); !os.IsNotExist(err) {
+		t.Fatal("unsupported toolchain recorded AWS demand")
+	}
+	if err := os.WriteFile(filepath.Join(home, "package.json"), []byte(`{"packageManager":"pnpm@10.28.0"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := selectProviderAtPressure(context.Background(), home, os.Args[0], []string{"cpu"}, true, "CPU contention", request); err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{readyMarker, wakeMarker} {
+		if _, err := os.Stat(marker); err != nil {
+			t.Fatal("supported Node command did not probe readiness and queue wake")
+		}
+	}
 }
 
 func TestAWSActivityUpdatesPreserveConcurrentDemand(t *testing.T) {

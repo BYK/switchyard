@@ -212,11 +212,43 @@ func awsRequestCapacity(scale bool) {
 		return
 	}
 	// Starting the service queues reconciliation without waiting for cloud APIs.
-	cmd := exec.Command("systemctl", "--user", "start", "--no-block", "switchyard-autoscale.service")
+	cmd := awsSystemctl("--user", "start", "--no-block", "switchyard-autoscale.service")
 	cmd.Stdin = bytes.NewReader(nil)
 	if cmd.Run() != nil {
 		fmt.Fprintln(os.Stderr, "switchyard: could not start AWS autoscale service")
 	}
+}
+
+func awsSystemctl(args ...string) *exec.Cmd {
+	cmd := exec.Command("systemctl", args...)
+	cmd.Env = awsAutoEnvironment(os.Environ(), fmt.Sprintf("/run/user/%d", os.Geteuid()))
+	return cmd
+}
+
+func awsAutoEnvironment(environment []string, runtimeDir string) []string {
+	for _, entry := range environment {
+		name, value, _ := strings.Cut(entry, "=")
+		if value != "" && (name == "XDG_RUNTIME_DIR" || name == "DBUS_SESSION_BUS_ADDRESS") {
+			return environment
+		}
+	}
+	// System services omit the user-bus environment. Only infer an existing,
+	// owner-private runtime directory; never create or repair one for a caller.
+	info, err := os.Lstat(runtimeDir)
+	if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
+		return environment
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uint32(os.Geteuid()) {
+		return environment
+	}
+	resolved := make([]string, 0, len(environment)+1)
+	for _, entry := range environment {
+		if !strings.HasPrefix(entry, "XDG_RUNTIME_DIR=") {
+			resolved = append(resolved, entry)
+		}
+	}
+	return append(resolved, "XDG_RUNTIME_DIR="+runtimeDir)
 }
 
 func awsRemoteLoad(dir, ip string) (int, error) {
@@ -439,7 +471,7 @@ func awsInstallAutoUnits(self, dataDir, workerDir string) error {
 		}
 	}
 	for _, args := range [][]string{{"--user", "daemon-reload"}, {"--user", "enable", "--now", "switchyard-autoscale.timer"}} {
-		command := exec.Command("systemctl", args...)
+		command := awsSystemctl(args...)
 		command.Stdin = bytes.NewReader(nil)
 		if command.Run() != nil {
 			return errors.New("could not enable the user autoscale timer; run systemctl --user daemon-reload and systemctl --user enable --now switchyard-autoscale.timer from your login shell")
@@ -483,7 +515,7 @@ func awsConfigureAuto(dir, self, source string, maxWorkers int) error {
 }
 
 func awsDisableAuto(dir string) error {
-	cmd := exec.Command("systemctl", "--user", "disable", "--now", "switchyard-autoscale.timer")
+	cmd := awsSystemctl("--user", "disable", "--now", "switchyard-autoscale.timer")
 	cmd.Stdin = bytes.NewReader(nil)
 	if cmd.Run() != nil {
 		return errors.New("could not disable the user autoscale timer")

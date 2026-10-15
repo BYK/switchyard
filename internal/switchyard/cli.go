@@ -147,7 +147,7 @@ func pressureFrom(cpu, memory []byte) (bool, string) {
 	return false, "local resources available"
 }
 
-func selectProvider(ctx context.Context, home, self, requested string, required []string) (shellProvider, string, error) {
+func selectProvider(ctx context.Context, home, self, requested string, required []string, command ...placementCommand) (shellProvider, string, error) {
 	if requested != "auto" {
 		provider, err := currentBackend(home, self, requested)
 		if err != nil {
@@ -192,10 +192,10 @@ func selectProvider(ctx context.Context, home, self, requested string, required 
 		return provider, "explicit backend", nil
 	}
 	busy, reason := pressured()
-	return selectProviderAtPressure(ctx, home, self, required, busy, reason)
+	return selectProviderAtPressure(ctx, home, self, required, busy, reason, command...)
 }
 
-func selectProviderAtPressure(ctx context.Context, home, self string, required []string, busy bool, reason string) (shellProvider, string, error) {
+func selectProviderAtPressure(ctx context.Context, home, self string, required []string, busy bool, reason string, command ...placementCommand) (shellProvider, string, error) {
 	local, err := currentBackend(home, self, "local")
 	if err != nil {
 		return shellProvider{}, "", err
@@ -209,6 +209,9 @@ func selectProviderAtPressure(ctx context.Context, home, self string, required [
 			return shellProvider{}, "", err
 		}
 		for _, provider := range list {
+			if isAWSWorker(provider.Name()) && !awsSupportsAutomaticCommand(command...) {
+				continue
+			}
 			if provider.cfg.Kind != "local" && supports(provider.cfg, required) && provider.Ready(ctx) {
 				if isAWSWorker(provider.Name()) {
 					available, err := awsWorkerAvailable(provider.Name())
@@ -223,7 +226,7 @@ func selectProviderAtPressure(ctx context.Context, home, self string, required [
 				return provider, reason, nil
 			}
 		}
-		if busy {
+		if busy && awsSupportsAutomaticCommand(command...) {
 			awsRequestWake()
 		}
 		if !supports(local.cfg, required) {
@@ -334,7 +337,7 @@ func executeJob(home, self, start, backend string, includes, required []string, 
 		return fail(err)
 	}
 	started := time.Now()
-	provider, reason, err := selectProvider(context.Background(), home, self, backend, required)
+	provider, reason, err := selectProvider(context.Background(), home, self, backend, required, placementCommand{Directory: start, Argv: argv})
 	if err != nil {
 		return fail(err)
 	}
@@ -373,6 +376,9 @@ func executeJob(home, self, start, backend string, includes, required []string, 
 				}
 			}()
 		}
+	}
+	if proxy && backend == "auto" {
+		fmt.Fprintf(os.Stderr, "switchyard: automatic routing to %s (%s)\n", provider.Name(), reason)
 	}
 	if proxy && provider.Name() == "local" {
 		path, err := exec.LookPath(argv[0])
@@ -482,6 +488,8 @@ func executeJob(home, self, start, backend string, includes, required []string, 
 		}
 		if !proxy {
 			fmt.Printf("Worker edits: %s (review before applying)\n", path)
+		} else if backend == "auto" {
+			fmt.Fprintf(os.Stderr, "switchyard: worker edits saved to %s (review before applying)\n", path)
 		}
 	}
 	if status.EditsError != "" {
@@ -600,6 +608,7 @@ func printHelp() {
 	fmt.Println("  switchyard stats [--limit N]       recent command timing samples by backend")
 	fmt.Println("  switchyard status|logs|cancel JOB_ID")
 	fmt.Println("  switchyard hook [--] TOOL ARGS...   (managed PATH shims)")
+	fmt.Println("  switchyard shell --repo PATH -- -c COMMAND   (automatic pressure-based shell-tool routing)")
 	fmt.Println("  switchyard hook --shell --resolved PATH -- TOOL ARGS...   (patched Bash external command hook)")
 	fmt.Println("  switchyard trace install           (private Linux x86-64 Bash launch link)")
 	fmt.Println("  switchyard trace shell -- -c COMMAND   (opt-in exec-filtered Bash supervisor)")
@@ -769,6 +778,16 @@ func Main(args []string) int {
 		return status
 	case "hook":
 		return runHook(home, self, args[1:])
+	case "shell":
+		flags := flag.NewFlagSet("shell", flag.ContinueOnError)
+		repo := flags.String("repo", ".", "command working directory")
+		if err := flags.Parse(args[1:]); err != nil {
+			return 2
+		}
+		if err := os.Chdir(*repo); err != nil {
+			return fail(errors.New("command working directory does not exist"))
+		}
+		return runShell(home, self, flags.Args())
 	case "trace":
 		return traceCommand(home, self, args[1:])
 	case "aws":
