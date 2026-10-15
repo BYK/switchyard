@@ -145,12 +145,9 @@ func runHook(home, self string, args []string) int {
 		return fail(errors.New("preview and inspect every selected and excluded path before forced tracing"))
 	}
 	if backend == "auto" && traced && previewed && !resolvedMismatch {
-		cwd, cwdErr := os.Getwd()
-		if cwdErr == nil {
-			if signature, ok := commandSignature(cwd, real, command); ok {
-				if selected := observedReadyBackend(home, self, signature); selected != "" {
-					backend = selected
-				}
+		if cwd, err := os.Getwd(); err == nil {
+			if selected := pressureReadyBackend(home, self, placementCommand{Directory: cwd, Argv: append([]string{tool}, command...)}); selected != "" {
+				backend = selected
 			}
 		}
 	}
@@ -187,12 +184,17 @@ func runHook(home, self string, args []string) int {
 	return executeJob(home, self, start, backend, nil, []string{"cpu"}, append([]string{tool}, command...), false, false)
 }
 
-func observedReadyBackend(home, self, signature string) string {
-	busy, _ := pressured()
-	return observedReadyBackendAtPressure(home, self, signature, busy)
+type placementCommand struct {
+	Directory string
+	Argv      []string
 }
 
-func observedReadyBackendAtPressure(home, self, signature string, busy bool) string {
+func pressureReadyBackend(home, self string, command placementCommand) string {
+	busy, _ := pressured()
+	return pressureReadyBackendAtPressure(home, self, busy, command)
+}
+
+func pressureReadyBackendAtPressure(home, self string, busy bool, command ...placementCommand) string {
 	if !busy {
 		return ""
 	}
@@ -200,52 +202,61 @@ func observedReadyBackendAtPressure(home, self, signature string, busy bool) str
 	if err != nil {
 		return ""
 	}
-	names := make([]string, 0, len(providers))
+	// Timings are diagnostics, never permission to try a remote worker. An
+	// unseen command must offload under pressure without first earning samples.
 	for _, provider := range providers {
-		if provider.cfg.Kind != "local" && supports(provider.cfg, []string{"cpu"}) {
-			names = append(names, observedBackendID(provider))
+		if isAWSWorker(provider.Name()) && !awsSupportsAutomaticCommand(command...) {
+			continue
 		}
-	}
-	if best := preferredObservedBackend(home, signature, names); best != "" {
-		for _, provider := range providers {
-			if observedBackendID(provider) == best && isAWSWorker(provider.Name()) && !provider.Ready(context.Background()) {
-				awsRequestWake()
-				break
-			}
+		if provider.cfg.Kind == "local" || !supports(provider.cfg, []string{"cpu"}) || !provider.Ready(context.Background()) {
+			continue
 		}
-	}
-	for len(names) > 0 {
-		best := preferredObservedBackend(home, signature, names)
-		if best == "" {
-			return ""
-		}
-		for _, provider := range providers {
-			if observedBackendID(provider) == best && provider.Ready(context.Background()) {
-				if isAWSWorker(provider.Name()) {
-					free, err := awsWorkerAvailable(provider.Name())
-					if err != nil || !free {
-						if err == nil {
-							awsRequestScale()
-						}
-						for _, other := range providers {
-							if isAWSWorker(other.Name()) && supports(other.cfg, []string{"cpu"}) && other.Ready(context.Background()) {
-								if available, err := awsWorkerAvailable(other.Name()); err == nil && available {
-									return other.Name()
-								}
-							}
-						}
-						continue
-					}
+		if isAWSWorker(provider.Name()) {
+			available, err := awsWorkerAvailable(provider.Name())
+			if err != nil || !available {
+				if err == nil {
+					awsRequestScale()
 				}
-				return provider.Name()
+				continue
 			}
 		}
-		for index, name := range names {
-			if name == best {
-				names = append(names[:index], names[index+1:]...)
-				break
-			}
-		}
+		return provider.Name()
+	}
+	if awsSupportsAutomaticCommand(command...) {
+		awsRequestWake()
 	}
 	return ""
+}
+
+func awsSupportsAutomaticCommand(command ...placementCommand) bool {
+	if len(command) == 0 {
+		return true
+	}
+	request := command[0]
+	if len(request.Argv) == 0 {
+		return false
+	}
+	// Managed AWS workers always use the pinned Node/pnpm image. A CPU slot
+	// alone never proves that Go, Rust, or Python tools exist inside that image.
+	manager := filepath.Base(request.Argv[0])
+	switch manager {
+	case "node", "npx":
+		return true
+	case "npm", "pnpm":
+		if request.Directory == "" {
+			return false
+		}
+		lock := "package-lock.json"
+		if manager == "pnpm" {
+			lock = "pnpm-lock.yaml"
+		}
+		// Reuse the image's setup checks so an incompatible project never wakes
+		// that worker or turns a working native command into a setup failure.
+		if _, err := containerPackageRoot(request.Directory, request.Directory, lock); err != nil {
+			return false
+		}
+		return manager != "pnpm" || validatePinnedPnpm(request.Directory) == nil
+	default:
+		return false
+	}
 }

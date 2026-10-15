@@ -479,12 +479,11 @@ func traceAutoReady(self string, pid int, expected []string) bool {
 	if err != nil {
 		return false
 	}
-	signature, valid := commandSignature(cwd, real, expected[1:])
-	if !valid {
+	if root, _, _, err := locateRepo(cwd); err != nil || root != cwd {
 		return false
 	}
 	home, err := dataHome()
-	return err == nil && observedReadyBackend(home, self, signature) != ""
+	return err == nil && pressureReadyBackend(home, self, placementCommand{Directory: cwd, Argv: expected}) != ""
 }
 
 func traceMatchesCommand(pid int, expected []string) bool {

@@ -151,6 +151,8 @@ func TestPressureAndCapabilityPlacement(t *testing.T) {
 	}
 	home := t.TempDir()
 	exe := binary(t)
+	t.Setenv("SWITCHYARD_HOME", home)
+	t.Setenv("SWITCHYARD_AWS_HOME", filepath.Join(home, "aws-worker"))
 	// The default local backend always stays available; explicit capability
 	// requests must not fall back to it when it cannot serve the job.
 	_, _, err := selectProviderAtPressure(context.Background(), home, exe, []string{"gpu"}, true, "CPU contention")
@@ -808,6 +810,9 @@ func TestHookPreservesLocalCommandAndRoutesConfiguredBackend(t *testing.T) {
 	if !equalPaths(shellCommand("pnpm --version"), []string{"pnpm", "--version"}) {
 		t.Fatal("shell adapter still restricts actions by subcommand")
 	}
+	if !equalPaths(shellCommand("make"), []string{"make"}) {
+		t.Fatal("shell adapter rejected a bare build command")
+	}
 	root := fixture(t)
 	home := t.TempDir()
 	exe := binary(t)
@@ -1012,6 +1017,8 @@ func TestSSHProviderTransfersAndPinsSnapshot(t *testing.T) {
 func TestExternalProviderContract(t *testing.T) {
 	root := fixture(t)
 	home := t.TempDir()
+	t.Setenv("SWITCHYARD_HOME", home)
+	t.Setenv("SWITCHYARD_AWS_HOME", filepath.Join(home, "aws-worker"))
 	exe := binary(t)
 	worker := filepath.Join(t.TempDir(), "worker")
 	status, output := command(t, exe, home, "worker", "--root", worker, "init")
@@ -1043,6 +1050,11 @@ exec %q "$@"
 	cfg := backendConfig{Name: "custom", Kind: "plugin", Root: worker, Command: adapter}
 	if err := saveBackend(home, cfg); err != nil {
 		t.Fatal(err)
+	}
+	// Pressure must bootstrap remote execution even for an unseen command.
+	// Requiring timings here makes the first remote sample impossible.
+	if name := pressureReadyBackendAtPressure(home, exe, true); name != "custom" {
+		t.Fatalf("pressure did not route a command with no timing history: %q", name)
 	}
 	auto, _, err := selectProviderAtPressure(context.Background(), home, exe, []string{"cpu"}, true, "CPU contention")
 	if err != nil || auto.Name() != "custom" {
@@ -1081,10 +1093,10 @@ exec %q "$@"
 	if err := recordCommandObservation(home, signature, observedBackendID(shellProvider{cfg: cfg}), time.Millisecond, 0); err != nil {
 		t.Fatal(err)
 	}
-	if name := observedReadyBackendAtPressure(home, exe, signature, true); name != "custom" {
-		t.Fatalf("learned plugin was not selected when faster and ready: %q", name)
+	if name := pressureReadyBackendAtPressure(home, exe, true); name != "custom" {
+		t.Fatalf("ready plugin was not selected under pressure: %q", name)
 	}
-	if name := observedReadyBackendAtPressure(home, exe, signature, false); name != "" {
+	if name := pressureReadyBackendAtPressure(home, exe, false); name != "" {
 		t.Fatalf("idle host selected a remote backend: %q", name)
 	}
 	pluginRun := exec.Command(exe, "run", "--backend", "custom", "--repo", root,
@@ -1107,5 +1119,45 @@ exec %q "$@"
 		"PATH="+tools+":"+os.Getenv("PATH"))
 	if output, err := fromPath.CombinedOutput(); err != nil {
 		t.Fatalf("worker did not resolve a tool using the invocation PATH: %v %s", err, output)
+	}
+}
+
+func TestAutomaticShellPreservesNativeFallback(t *testing.T) {
+	home, root, tools := t.TempDir(), t.TempDir(), t.TempDir()
+	exe := binary(t)
+	tool := filepath.Join(tools, "pnpm")
+	if err := os.WriteFile(tool, []byte("#!/bin/sh\nIFS= read -r input\nprintf 'native:%s:%s\\n' \"$input\" \"$PWD\"\nprintf 'native stderr\\n' >&2\nexit 37\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(exe, "shell", "--repo", root, "--", "-c", "pnpm test")
+	cmd.Env = append(os.Environ(), "SWITCHYARD_HOME="+home, "SWITCHYARD_BACKEND=auto", "SWITCHYARD_TRACE_PREVIEWED=", "PATH="+tools+":"+os.Getenv("PATH"))
+	cmd.Stdin = strings.NewReader("stdin preserved\n")
+	output, err := cmd.CombinedOutput()
+	if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 37 {
+		t.Fatalf("automatic shell lost the native exit status: %v %s", err, output)
+	}
+	if !strings.Contains(string(output), "native:stdin preserved:"+root) || !strings.Contains(string(output), "native stderr") {
+		t.Fatalf("automatic shell lost streams or working directory: %s", output)
+	}
+	if _, err := os.Stat(filepath.Join(home, "runs")); !os.IsNotExist(err) {
+		t.Fatal("a non-worktree native command created remote job records")
+	}
+}
+
+func TestAutomaticShellPreservesAbsoluteLocalExecutable(t *testing.T) {
+	home, root, tools := t.TempDir(), fixture(t), t.TempDir()
+	exe := binary(t)
+	tool := filepath.Join(root, "pnpm")
+	if err := os.WriteFile(tool, []byte("#!/bin/sh\nprintf 'correct absolute executable\\n'\nexit 37\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tools, "pnpm"), []byte("#!/bin/sh\nprintf 'wrong PATH executable\\n'\nexit 44\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(exe, "shell", "--repo", root, "--", "-c", tool+" test")
+	cmd.Env = append(os.Environ(), "SWITCHYARD_HOME="+home, "SWITCHYARD_AWS_HOME="+filepath.Join(home, "aws-worker"), "SWITCHYARD_BACKEND=auto", "PATH="+tools+":"+os.Getenv("PATH"))
+	output, err := cmd.CombinedOutput()
+	if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 37 || !strings.Contains(string(output), "correct absolute executable") {
+		t.Fatalf("automatic fallback changed the resolved executable: %v %s", err, output)
 	}
 }
