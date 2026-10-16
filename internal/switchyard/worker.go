@@ -386,6 +386,8 @@ func workerLoad(root string) (int, error) {
 				}
 			case "starting", "running":
 				active++
+			case "discarded":
+				// A discarded preparation never started a command and holds no result.
 			default:
 				return 0, errors.New("unknown worker job state")
 			}
@@ -489,7 +491,7 @@ func resolvedWorkerCommand(name, target string, environment []string) (string, e
 	return "", errors.New("worker executable not found in the invocation PATH")
 }
 
-func nodeCommand(checkout, target, marker string, argv, environment []string) (*exec.Cmd, bool, error) {
+func nodeCommand(checkout, target, marker string, argv, environment []string, quiet bool) (*exec.Cmd, bool, error) {
 	manager := filepath.Base(argv[0])
 	if manager != "pnpm" && manager != "npm" {
 		executable, err := resolvedWorkerCommand(argv[0], target, environment)
@@ -519,11 +521,15 @@ func nodeCommand(checkout, target, marker string, argv, environment []string) (*
 	}
 	// The marker is outside the checkout. The real command starts only after
 	// dependency setup succeeds in this same, cancellable process group.
+	silence := ""
+	if quiet {
+		silence = " >/dev/null 2>&1"
+	}
 	script := `cd "$1" || exit 2
 if [ "$2" = pnpm ]; then
-  "$2" install --frozen-lockfile --prefer-offline || exit $?
+  "$2" install --frozen-lockfile --prefer-offline` + silence + ` || exit $?
 else
-  "$2" ci --prefer-offline --no-audit --no-fund || exit $?
+  "$2" ci --prefer-offline --no-audit --no-fund` + silence + ` || exit $?
 fi
 cd "$4" || exit 2
 : > "$3" || exit 2
@@ -547,7 +553,7 @@ func exitStatus(err error) int {
 	return 127
 }
 
-func workerExecute(root, project, job, snapshot, cwd string, argv, environment []string, stdin io.Reader) (int, error) {
+func workerExecute(root, project, job, snapshot, cwd string, argv, environment []string, stdin io.Reader, quiet bool) (int, error) {
 	if err := workerReady(root); err != nil {
 		return 2, err
 	}
@@ -563,6 +569,14 @@ func workerExecute(root, project, job, snapshot, cwd string, argv, environment [
 	path, err := jobPath(root, project, job)
 	if err != nil {
 		return 2, err
+	}
+	lease, err := jobExecutionLease(path)
+	if err != nil {
+		return 2, err
+	}
+	defer lease.Close()
+	if _, err := os.Lstat(filepath.Join(path, "job.json")); !os.IsNotExist(err) {
+		return 2, errors.New("job already has execution history")
 	}
 	incoming := filepath.Join(path, "incoming", "files")
 	m, err := verifyTree(incoming)
@@ -605,18 +619,31 @@ func workerExecute(root, project, job, snapshot, cwd string, argv, environment [
 	var setup bool
 	var planErr error
 	if image.ID != "" {
-		cmd, setup, planErr = containerJobCommand(root, path, checkout, cwd, argv, environment, image)
+		cmd, setup, planErr = containerJobCommand(root, path, checkout, cwd, argv, environment, image, quiet)
 	} else {
-		cmd, setup, planErr = nodeCommand(checkout, target, filepath.Join(path, "setup-ready"), argv, environment)
+		cmd, setup, planErr = nodeCommand(checkout, target, filepath.Join(path, "setup-ready"), argv, environment, quiet)
 	}
 	if planErr != nil {
-		fmt.Fprintln(logWriter{log: output, stream: os.Stderr}, "switchyard: "+planErr.Error())
+		if quiet {
+			logEvent(root, "command-plan", "failed", time.Time{})
+		} else {
+			fmt.Fprintln(logWriter{log: output, stream: os.Stderr}, "switchyard: "+planErr.Error())
+		}
 		record.State, record.SetupStatus, record.Finished = "setup-failed", new(int), time.Now().UTC().Format(time.RFC3339Nano)
 		*record.SetupStatus = 2
 		if err := log.Close(); err != nil {
 			return 2, errors.New("could not close job log")
 		}
-		return 2, writeJob(path, record)
+		if err := writeAtomic(filepath.Join(path, "changes.patch"), nil); err != nil {
+			record.EditsError = "could not save job patch"
+		}
+		if err := writeJob(path, record); err != nil {
+			return 2, err
+		}
+		if err := releaseJobTrees(path, record); err != nil {
+			logEvent(root, "cleanup", "failed", time.Time{})
+		}
+		return 2, nil
 	}
 	defer func() {
 		for _, file := range cmd.ExtraFiles {
@@ -690,7 +717,7 @@ func workerExecute(root, project, job, snapshot, cwd string, argv, environment [
 		signal.Stop(stops)
 	}
 	if err := log.Close(); err != nil {
-		return 2, errors.New("could not close job log")
+		logEvent(root, "job-log", "close-failed", time.Time{})
 	}
 	record.LogTruncated = output.truncated
 	record.EditsError = collectPatch(incoming, checkout, filepath.Join(path, "changes.patch"))
@@ -701,9 +728,9 @@ func workerExecute(root, project, job, snapshot, cwd string, argv, environment [
 	}
 	// A failed mirror update never changes the result of a completed command.
 	if err := publishMirror(root, project, snapshot, incoming); err != nil {
-		fmt.Fprintln(os.Stderr, "switchyard: worker cache could not be updated")
+		logEvent(root, "mirror", "save-failed", time.Time{})
 	}
-	if setup {
+	if setup || cmd.Process == nil {
 		marker := filepath.Join(path, "setup-ready")
 		if image.ID != "" {
 			marker = filepath.Join(path, "setup", "ready")
@@ -717,7 +744,14 @@ func workerExecute(root, project, job, snapshot, cwd string, argv, environment [
 	}
 	record.Finished = time.Now().UTC().Format(time.RFC3339Nano)
 	if err := writeJob(path, record); err != nil {
-		return 2, err
+		logEvent(root, "job-record", "save-failed", time.Time{})
+		return status, nil
+	}
+	cleanupStarted := time.Now()
+	if err := releaseJobTrees(path, record); err != nil {
+		logEvent(root, "cleanup", "failed", cleanupStarted)
+	} else {
+		logEvent(root, "cleanup", "complete", cleanupStarted)
 	}
 	if record.State == "setup-failed" {
 		if status >= 128 {
@@ -908,7 +942,7 @@ func collectPatch(original, checkout, dest string) string {
 	return ""
 }
 
-func runWorker(root, action, project, job, snapshot, cwd string, argv, environment []string, stdin io.Reader) (int, error) {
+func runWorker(root, action, project, job, snapshot, cwd string, argv, environment []string, stdin io.Reader, quiet bool) (int, error) {
 	switch action {
 	case "init":
 		return 0, initWorker(root)
@@ -922,8 +956,10 @@ func runWorker(root, action, project, job, snapshot, cwd string, argv, environme
 		return 0, err
 	case "prepare":
 		return 0, workerPrepare(root, project, job)
+	case "discard":
+		return 0, discardPreparedJob(root, project, job)
 	case "execute":
-		return workerExecute(root, project, job, snapshot, cwd, argv, environment, stdin)
+		return workerExecute(root, project, job, snapshot, cwd, argv, environment, stdin, quiet)
 	case "image":
 		if project != "" || job != "" || cwd != "." || len(argv) != 0 {
 			return 2, errors.New("invalid worker image request")

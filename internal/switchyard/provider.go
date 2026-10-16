@@ -242,8 +242,9 @@ func upsertAWSBackend(home string, cfg backendConfig) error {
 }
 
 type shellProvider struct {
-	cfg  backendConfig
-	self string
+	cfg   backendConfig
+	self  string
+	quiet bool
 }
 
 type responseBuffer struct {
@@ -278,12 +279,15 @@ func (provider shellProvider) sshOptions() []string {
 	if provider.cfg.Port != 0 {
 		options = append(options, "-p", strconv.Itoa(provider.cfg.Port))
 	}
+	if provider.quiet {
+		options = append(options, "-o", "LogLevel=QUIET")
+	}
 	return options
 }
 
 func (provider shellProvider) command(ctx context.Context, request wireRequest) (*exec.Cmd, error) {
 	args := request.Args
-	wired := provider.cfg.Kind == "ssh" || request.Environment != nil
+	wired := provider.cfg.Kind == "ssh" || request.Environment != nil || request.Quiet
 	if wired {
 		args = []string{"wire"}
 	}
@@ -312,7 +316,7 @@ func (provider shellProvider) command(ctx context.Context, request wireRequest) 
 }
 
 func (provider shellProvider) Call(ctx context.Context, args []string, stream bool) (int, []byte, error) {
-	return provider.call(ctx, wireRequest{Args: args}, stream)
+	return provider.call(ctx, wireRequest{Args: args, Quiet: provider.quiet}, stream)
 }
 
 func (provider shellProvider) Execute(ctx context.Context, args, environment []string) (int, []byte, error) {
@@ -323,7 +327,7 @@ func (provider shellProvider) Execute(ctx context.Context, args, environment []s
 	for i, entry := range environment {
 		encoded[i] = []byte(entry)
 	}
-	return provider.call(ctx, wireRequest{Args: args, Environment: &encoded}, true)
+	return provider.call(ctx, wireRequest{Args: args, Environment: &encoded, Quiet: provider.quiet}, true)
 }
 
 func (provider shellProvider) call(ctx context.Context, request wireRequest, stream bool) (int, []byte, error) {
@@ -391,6 +395,13 @@ func (provider shellProvider) Prepare(ctx context.Context, project, job string) 
 	return err
 }
 
+type snapshotTransferError struct {
+	message, reason string
+	exitCode        int
+}
+
+func (failure *snapshotTransferError) Error() string { return failure.message }
+
 func (provider shellProvider) Sync(ctx context.Context, tree, project, job string) error {
 	if err := requireID(project); err != nil {
 		return err
@@ -402,7 +413,7 @@ func (provider shellProvider) Sync(ctx context.Context, tree, project, job strin
 		cmd := exec.CommandContext(ctx, provider.cfg.Command, "sync", "--root", provider.cfg.Root,
 			"--project", project, "--job", job, "--source", tree)
 		if err := cmd.Run(); err != nil {
-			return errors.New("plugin snapshot transfer failed")
+			return &snapshotTransferError{"plugin snapshot transfer failed", "adapter-failed", exitStatus(err)}
 		}
 		return nil
 	}
@@ -422,24 +433,27 @@ func (provider shellProvider) Sync(ctx context.Context, tree, project, job strin
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		failure := ""
-		for _, candidate := range []struct{ token, label string }{
-			{"Host key verification failed", "SSH host key verification failed"},
-			{"Permission denied", "remote permission denied"},
-			{"No such file or directory", "transfer path or remote rsync is missing"},
-			{"Connection refused", "SSH connection refused"},
-			{"protocol version mismatch", "remote shell interfered with rsync"},
-			{"mkstemp", "remote temporary file could not be created"},
+		reason := "rsync-failed"
+		for _, candidate := range []struct{ token, label, result string }{
+			{"No space left on device", "worker disk is full", "disk-full"},
+			{"Host key verification failed", "SSH host key verification failed", "host-key"},
+			{"Permission denied", "remote permission denied", "permission"},
+			{"No such file or directory", "transfer path or remote rsync is missing", "missing-path"},
+			{"Connection refused", "SSH connection refused", "connection-refused"},
+			{"protocol version mismatch", "remote shell interfered with rsync", "protocol"},
+			{"mkstemp", "remote temporary file could not be created", "temporary-file"},
 		} {
 			if strings.Contains(string(output), candidate.token) {
 				failure = ": " + candidate.label
+				reason = candidate.result
 				break
 			}
 		}
 		var exited *exec.ExitError
 		if errors.As(err, &exited) {
-			return fmt.Errorf("snapshot transfer to %s failed (rsync exit %d%s)", provider.Name(), exited.ExitCode(), failure)
+			return &snapshotTransferError{fmt.Sprintf("snapshot transfer to %s failed (rsync exit %d%s)", provider.Name(), exited.ExitCode(), failure), reason, exited.ExitCode()}
 		}
-		return fmt.Errorf("snapshot transfer to %s failed", provider.Name())
+		return &snapshotTransferError{fmt.Sprintf("snapshot transfer to %s failed", provider.Name()), reason, -1}
 	}
 	return nil
 }

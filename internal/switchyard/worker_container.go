@@ -96,7 +96,7 @@ func validatePinnedPnpm(packageRoot string) error {
 	return nil
 }
 
-func containerJobCommand(root, jobPath, checkout, cwd string, argv, environment []string, image workerImage) (*exec.Cmd, bool, error) {
+func containerJobCommand(root, jobPath, checkout, cwd string, argv, environment []string, image workerImage, quiet bool) (*exec.Cmd, bool, error) {
 	if err := inspectRuntimeImage(image.Runtime, image.ID); err != nil {
 		return nil, false, err
 	}
@@ -124,6 +124,10 @@ func containerJobCommand(root, jobPath, checkout, cwd string, argv, environment 
 		if err != nil {
 			return nil, true, err
 		}
+		silence := ""
+		if quiet {
+			silence = " >/dev/null 2>&1"
+		}
 		if manager == "pnpm" {
 			relative, err := filepath.Rel("/workspace", packageRoot)
 			if err != nil {
@@ -137,9 +141,9 @@ func containerJobCommand(root, jobPath, checkout, cwd string, argv, environment 
 		// locked dependency setup succeeds. The job's real command then execs.
 		script := `cd "$1" || exit 2
 if [ "$2" = pnpm ]; then
-  pnpm install --frozen-lockfile --prefer-offline || exit $?
+pnpm install --frozen-lockfile --prefer-offline` + silence + ` || exit $?
 else
-  npm ci --prefer-offline --no-audit --no-fund || exit $?
+npm ci --prefer-offline --no-audit --no-fund` + silence + ` || exit $?
 fi
 cd "$4" || exit 2
 : > "$3" || exit 2

@@ -94,7 +94,7 @@ func TestRootlessWorkerArgumentsDoNotExposeInvocationValues(t *testing.T) {
 	secret := "private-value-with-newline\nnext-line"
 	cmd, setup, err := containerJobCommand(root, jobPath, checkout, ".", []string{"node", "-v"},
 		[]string{"HOME=/from-invoker", "XDG_DATA_HOME=/from-invoker/data", "USER=switchyard-invoker", "LOGNAME=switchyard-invoker", "SWITCHYARD_TEST_SECRET=" + secret, "npm_config_store_dir=/workspace/.pnpm-store"},
-		workerImage{ID: "sha256:" + strings.Repeat("c", 64), Runtime: "podman"})
+		workerImage{ID: "sha256:" + strings.Repeat("c", 64), Runtime: "podman"}, false)
 	if err != nil || setup {
 		t.Fatalf("rootless job could not be prepared: %v", err)
 	}

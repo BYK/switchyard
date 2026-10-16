@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 	"unsafe"
 )
 
@@ -180,7 +181,7 @@ func runHook(home, self string, args []string) int {
 		}
 		return 0
 	}
-	fmt.Fprintf(os.Stderr, "switchyard: routing %s to backend %s\n", tool, backend)
+	logEvent(home, "placement", "remote", time.Time{})
 	return executeJob(home, self, start, backend, nil, []string{"cpu"}, append([]string{tool}, command...), false, false)
 }
 
