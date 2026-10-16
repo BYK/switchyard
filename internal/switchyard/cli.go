@@ -523,16 +523,20 @@ func executeJobAttempt(home, self, start, backend string, includes, required []s
 		return 2
 	}
 	if err != nil || status.State != "finished" || status.ExitStatus == nil || status.Snapshot != captured.Snapshot {
-		if attempt.automatic && executeErr == nil {
+		if executeErr == nil {
+			// Auxiliary result retrieval never replaces an execution result,
+			// including for an explicitly selected backend.
 			logEvent(home, "status", "unconfirmed", time.Time{})
+			if !attempt.automatic {
+				fmt.Fprintln(os.Stderr, "switchyard: worker result is unconfirmed; preserving execution exit status")
+			}
 			return exit
 		}
 		return fail(errors.New("worker did not confirm the command exit status and snapshot"))
 	}
 	if executeErr != nil || *status.ExitStatus != exit {
-		if !attempt.automatic {
-			return fail(errors.New("worker did not confirm the command exit status and snapshot"))
-		}
+		// A validated terminal record confirms the original execution; it
+		// never authorizes running the command again after a lost response.
 		logEvent(home, "status", "reconciled", time.Time{})
 		exit = *status.ExitStatus
 	}
@@ -545,19 +549,19 @@ func executeJobAttempt(home, self, start, backend string, includes, required []s
 			return patchErr
 		})
 		if err != nil || len(patch) > maxPatchSize {
-			if attempt.automatic {
-				logEvent(home, "patch", "retrieve-failed", time.Time{})
-				return exit
+			logEvent(home, "patch", "retrieve-failed", time.Time{})
+			if !attempt.automatic {
+				fmt.Fprintln(os.Stderr, "switchyard: could not retrieve worker edits; preserving command exit status")
 			}
-			return fail(errors.New("could not retrieve worker edits"))
+			return exit
 		}
 		path := filepath.Join(home, "runs", job+".patch")
 		if err := writeAtomic(path, patch); err != nil {
-			if attempt.automatic {
-				logEvent(home, "patch", "save-failed", time.Time{})
-				return exit
+			logEvent(home, "patch", "save-failed", time.Time{})
+			if !attempt.automatic {
+				fmt.Fprintln(os.Stderr, "switchyard: could not save worker edits; preserving command exit status")
 			}
-			return fail(err)
+			return exit
 		}
 		if !proxy {
 			fmt.Printf("Worker edits: %s (review before applying)\n", path)

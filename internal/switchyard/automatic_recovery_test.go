@@ -27,6 +27,7 @@ func TestAutomaticRecoveryPreservesCommandAndNeverDuplicatesExecution(t *testing
 		{"invalid status preserves known exit", "invalid-status", "remote", 1, false},
 		{"lost status does not rerun command", "status-fails", "remote", 1, false},
 		{"patch failure retains command exit", "patch-fails", "remote", 1, false},
+		{"patch save failure retains command exit", "patch-save-fails", "remote", 1, false},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			root, home, repo, adapter, executable := automaticRecoveryFixture(t)
@@ -119,6 +120,32 @@ func TestExplicitTransferFailureDoesNotSilentlyRunLocally(t *testing.T) {
 	}
 }
 
+func TestExplicitResultFailuresPreserveCompletedExit(t *testing.T) {
+	for _, mode := range []string{"patch-fails", "patch-save-fails", "status-fails", "invalid-status", "execute-lost"} {
+		for _, expected := range []int{0, 37} {
+			t.Run(mode+"/exit-"+strconv.Itoa(expected), func(t *testing.T) {
+				root, home, repo, adapter, executable := automaticRecoveryFixture(t)
+				if err := saveBackend(home, backendConfig{Name: "fixture", Kind: "plugin", Root: filepath.Join(root, "worker"), Command: adapter}); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("RECOVERY_MODE", mode)
+				t.Setenv("RECOVERY_EXIT", strconv.Itoa(expected))
+				out, stderr, status := recoveryCommand(t, root, executable, "proxy", "--repo", repo, "--backend", "fixture", "--", "pnpm", "test")
+				if status != expected || !strings.HasSuffix(out, "remote stdout\n") || !strings.Contains(stderr, "remote stderr\n") {
+					t.Fatalf("completed command changed: exit=%d stdout=%q stderr=%q", status, out, stderr)
+				}
+				remote, _ := os.ReadFile(filepath.Join(root, "remote-count"))
+				if len(remote) != 1 {
+					t.Fatalf("remote executions = %d; want 1", len(remote))
+				}
+				if _, err := os.Stat(filepath.Join(root, "native-count")); !os.IsNotExist(err) {
+					t.Fatal("explicit result recovery reran the command locally")
+				}
+			})
+		}
+	}
+}
+
 func automaticRecoveryFixture(t *testing.T) (string, string, string, string, string) {
 	t.Helper()
 	if _, err := exec.LookPath("python3"); err != nil {
@@ -140,6 +167,7 @@ func automaticRecoveryFixture(t *testing.T) (string, string, string, string, str
 	t.Setenv("SWITCHYARD_BACKEND", "")
 	t.Setenv("RECOVERY_ROOT", root)
 	t.Setenv("RECOVERY_SOURCE", repo)
+	t.Setenv("RECOVERY_EXIT", "37")
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	recoveryCommand(t, repo, "git", "init", "-q")
 	recoveryCommand(t, repo, "git", "config", "user.email", "fixture@example.invalid")
@@ -159,10 +187,10 @@ case "$1" in
 esac
 if [ "$PWD" = "$RECOVERY_SOURCE" ]; then kind=native; else kind=remote; fi
 printf x >> "$RECOVERY_ROOT/$kind-count"
-if [ "$RECOVERY_MODE" = patch-fails ]; then printf changed > worker-note.txt; fi
+if [ "$RECOVERY_MODE" = patch-fails ] || [ "$RECOVERY_MODE" = patch-save-fails ]; then printf changed > worker-note.txt; fi
 printf '%s stdout\n' "$kind"
 printf '%s stderr\n' "$kind" >&2
-exit 37
+exit "${RECOVERY_EXIT:-37}"
 `, 0o755)
 	adapter := filepath.Join(root, "adapter")
 	recoveryWrite(t, adapter, `#!/usr/bin/python3
@@ -192,7 +220,15 @@ if action == 'sync':
     os.execv('/usr/bin/rsync', ['rsync', '-a', '--checksum', '--delete', '--', source+'/', root+'/projects/'+project+'/jobs/'+job+'/incoming/files/'])
 if action == 'status' and mode in ['status-fails', 'execute-status-lost'] or action == 'patch' and mode == 'patch-fails':
     sys.exit(11)
+if action == 'patch' and mode == 'patch-save-fails':
+    os.mkdir(os.path.join(base, 'state', 'runs', args[args.index('--job')+1]+'.patch'), 0o700)
 binary = `+strconv.Quote(executable)+`
+if not wired and action == 'status' and mode == 'invalid-status':
+    completed = subprocess.run([binary, 'worker', '--root', root]+args, stdout=subprocess.PIPE)
+    payload = json.loads(completed.stdout)
+    payload['exit_status'] = 256
+    print(json.dumps(payload))
+    sys.exit(0)
 if wired:
     if action == 'status' and mode == 'invalid-status':
         completed = subprocess.run([binary, 'worker', '--root', root, 'wire'], input=request+sys.stdin.buffer.read(), stdout=subprocess.PIPE)
