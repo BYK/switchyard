@@ -52,8 +52,11 @@ func TestPinnedNodeImageRunsIsolatedSnapshotAndReturnsEdits(t *testing.T) {
 		t.Fatal(err)
 	}
 	code := `const fs = require('node:fs');
+const { execFileSync } = require('node:child_process');
 if (fs.existsSync('.env') || fs.existsSync('/var/run/docker.sock')) process.exit(91);
 if (process.env.SWITCHYARD_BACKEND !== 'local' || process.env.HOME !== '/home/switchyard' || process.env.SWITCHYARD_TEST_ENV !== 'forwarded' || process.env.USER !== 'switchyard-invoker' || process.env.LOGNAME !== 'switchyard-invoker') process.exit(92);
+if (execFileSync('jq', ['-er', '.tool'], { input: '{"tool":"jq"}', encoding: 'utf8' }).trim() !== 'jq') process.exit(94);
+if (execFileSync('ps', ['-p', String(process.pid), '-o', 'pid='], { encoding: 'utf8' }).trim() !== String(process.pid)) process.exit(95);
 process.stdin.setEncoding('utf8');
 let content = '';
 process.stdin.on('data', chunk => content += chunk);
