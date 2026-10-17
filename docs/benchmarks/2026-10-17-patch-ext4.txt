@@ -7,7 +7,7 @@ ok  	github.com/BYK/switchyard/internal/switchyard	1.574s
 goos: linux
 goarch: amd64
 pkg: github.com/BYK/switchyard/internal/switchyard
-cpu: AMD EPYC 7763 64-Core Processor                
+cpu: AMD EPYC 7763 64-Core Processor
 BenchmarkSnapshotCapture/text/copy-2         	       1	  25703721 ns/op	   2121728 proc-write-B/op
 BenchmarkSnapshotCapture/text/copy-2         	       1	  23503845 ns/op	   2121728 proc-write-B/op
 BenchmarkSnapshotCapture/text/copy-2         	       1	  24067728 ns/op	   2121728 proc-write-B/op

@@ -7,7 +7,7 @@ ok  	github.com/BYK/switchyard/internal/switchyard	1.500s
 goos: linux
 goarch: amd64
 pkg: github.com/BYK/switchyard/internal/switchyard
-cpu: AMD EPYC 9V45 96-Core Processor                
+cpu: AMD EPYC 9V45 96-Core Processor
 BenchmarkSnapshotCapture/text/copy-2         	       1	  19993805 ns/op	   2154496 proc-write-B/op
 BenchmarkSnapshotCapture/text/copy-2         	       1	  18514362 ns/op	   2154496 proc-write-B/op
 BenchmarkSnapshotCapture/text/copy-2         	       1	  17904241 ns/op	   2154496 proc-write-B/op
