@@ -26,6 +26,42 @@ The test-only overlay uses an immutable lower tree and a separate writable upper
 
 Production continues to use ordinary directories. Enabling FUSE in a worker would require explicit lower-tree lifetime management, container mount integration, failure recovery and a measured complete-job benefit. A faster mount by itself does not establish that benefit: file reads, metadata access and result collection also traverse FUSE.
 
+## Measured results — 2026-10-17
+
+[Workflow run 39063138467](https://github.com/BYK/switchyard/actions/runs/39063138467), code commit `3c7a3eef721aefacb4e2e64003b0bf12a151217b`. Go 1.22.12, Linux 6.17.0-1022-azure, fuse-overlayfs 1.13. The native ext4 runner used an Intel Xeon 6973P-C; the loopback Btrfs runner used an AMD EPYC 7763. Compare methods within a runner, not absolute times across filesystems. Values below are medians of three samples. [Raw ext4 samples](benchmarks/2026-10-17-ext4.txt) and [raw Btrfs samples](benchmarks/2026-10-17-btrfs.txt) retain all observations.
+
+Btrfs capture reduces new large-file writes, but it does not remove hashing cost:
+
+| Capture fixture | Copy (ms) | Automatic (ms) | Copy accounted writes (KiB) | Automatic accounted writes (KiB) |
+| --- | ---: | ---: | ---: | ---: |
+| 2 MiB text | 32.9 | 33.3 | 2136 | 2120 |
+| 64 MiB binary | 162.3 | 173.1 | 65548 | 12 |
+| 8 MiB / 2,048 files | 310.3 | 315.5 | 9108 | 9124 |
+
+The binary capture saved approximately 64 MiB of accounted writes while taking about 7% longer. This is a write-amplification improvement, not a demonstrated latency improvement. Small captures use the ordinary copy+hash path; the 1 MiB cutoff is conservative, not a tuned optimum. On ext4, the 64 MiB capture took about 110 ms with either method and wrote the same number of bytes. An initial ext4 fallback regression was traced to truncating an already-empty destination; avoiding that truncate restored the normal copy behavior.
+
+Complete checkout → command → patch collection → cleanup:
+
+| Storage | Fixture | Automatic (ms) | FUSE (ms) |
+| --- | --- | ---: | ---: |
+| ext4 | 2 MiB text | 42.6 | 61.0 |
+| ext4 | 64 MiB binary | 1460.7 | 1481.6 |
+| ext4 | 2,048 files | 284.3 | 375.9 |
+| Btrfs | 2 MiB text | 101.6 | 115.6 |
+| Btrfs | 64 MiB binary | 2070.5 | 2094.4 |
+| Btrfs | 2,048 files | 955.1 | 1005.6 |
+
+FUSE did not improve the complete loop in these samples. On Btrfs with 2,048 files, preparation fell from 146 ms to 11 ms, but patch collection rose from 667 ms to 874 ms. On the binary fixture, patch collection consumed roughly 98–99% of automatic checkout-loop time. Reusing verified base Git objects/indexes or reducing result scanning is a more promising next experiment than enabling production FUSE. The ordinary `io.Copy` baseline's low preparation cost and write counts are consistent with Btrfs kernel copy offloading. The ext4 text/copy samples varied substantially (44–739 ms); they do not support a claimed copy-versus-reflink speedup.
+
+The real local-provider dispatch benchmark (including automatic artifact return) measured:
+
+| Storage | Cold (ms) | Warm unchanged (ms) | Warm small edit (ms) |
+| --- | ---: | ---: | ---: |
+| ext4 | 136.8 | 133.3 | 136.2 |
+| Btrfs | 277.1 | 247.6 | 283.5 |
+
+These dispatch values establish a reproducible local baseline, not a before/after comparison or a remote-cloud latency claim. FUSE was only used in the checkout experiment. FUSE isolation and the 32-view lifecycle test passed on both runners; required reflink isolation passed on Btrfs.
+
 ## Reproduce
 
 On Linux with Go, Git and rsync:
