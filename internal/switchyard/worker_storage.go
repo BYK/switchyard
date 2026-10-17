@@ -1,7 +1,10 @@
 package switchyard
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -12,7 +15,7 @@ import (
 // incoming files are disposable only after that result exists. In particular,
 // failed edit collection must retain the checkout for recovery.
 func releaseJobTrees(directory string, record jobRecord) error {
-	if (record.State != "finished" && record.State != "setup-failed") || record.EditsError != "" || record.ExitStatus == nil && record.SetupStatus == nil {
+	if (record.State != "finished" && record.State != "setup-failed") || record.EditsError != "" || record.ArtifactError != "" || record.ExitStatus == nil && record.SetupStatus == nil {
 		return nil
 	}
 	patch, err := os.Lstat(filepath.Join(directory, "changes.patch"))
@@ -25,12 +28,25 @@ func releaseJobTrees(directory string, record jobRecord) error {
 	}
 	// Rename alone is not crash durability. Flush every result and its directory
 	// before deleting the only writable copy of the command's edits.
-	for _, name := range []string{"job.json", "changes.patch", "output.log"} {
+	results := []string{"job.json", "changes.patch", "output.log"}
+	if len(record.Outputs) != 0 {
+		info, err := os.Lstat(filepath.Join(directory, artifactFile))
+		if err != nil || !info.Mode().IsRegular() || !ownedByCurrentUser(info) || info.Mode().Perm() != 0o600 || info.Size() != record.ArtifactSize || record.ArtifactSize <= 0 || record.ArtifactSize > maxArtifactBundle || requireSnapshot(record.ArtifactHash) != nil {
+			return errors.New("job artifacts are not saved")
+		}
+		results = append(results, artifactFile)
+	}
+	for _, name := range results {
 		file, err := os.OpenFile(filepath.Join(directory, name), os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
 		if err != nil {
 			return errors.New("job result is not saved")
 		}
 		valid := privateOwnedFile(file)
+		if valid && name == artifactFile {
+			hash := sha256.New()
+			n, readErr := io.Copy(hash, io.LimitReader(file, maxArtifactBundle+1))
+			valid = readErr == nil && n == record.ArtifactSize && hex.EncodeToString(hash.Sum(nil)) == record.ArtifactHash
+		}
 		if valid {
 			err = file.Sync()
 		}

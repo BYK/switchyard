@@ -54,6 +54,7 @@ var deniedParts = map[string]bool{
 }
 
 var deniedGlobs = []string{
+	".switchyard-return-*",
 	".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "*.sqlite",
 	"*.sqlite3", "*.db", "*.tfstate", "*.tfstate.*", "*.tfvars", "*.tfvars.*",
 }

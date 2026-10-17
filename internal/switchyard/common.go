@@ -210,9 +210,13 @@ func copyFile(source, dest string, mode os.FileMode) error {
 		return err
 	}
 	_, copyErr := io.Copy(output, input)
+	modeErr := output.Chmod(mode)
 	closeErr := output.Close()
 	if copyErr != nil {
 		return copyErr
+	}
+	if modeErr != nil {
+		return modeErr
 	}
 	return closeErr
 }

@@ -59,14 +59,14 @@ func (attempt *jobAttempt) retry(ctx context.Context, phase string, operation fu
 	return err
 }
 
-func executeJob(home, self, start, backend string, includes, required []string, argv []string, details, proxy bool) int {
+func executeJob(home, self, start, backend string, includes, required []string, argv []string, details, proxy bool, outputs ...string) int {
 	attempt := &jobAttempt{home: home, phase: "placement", automatic: automaticInvocation(backend, proxy), canRunLocal: len(argv) != 0}
 	for _, capability := range required {
 		if capability != "cpu" {
 			attempt.canRunLocal = false
 		}
 	}
-	exit := executeJobAttempt(home, self, start, backend, includes, required, argv, details, proxy, attempt)
+	exit := executeJobAttempt(home, self, start, backend, includes, required, argv, details, proxy, attempt, outputs...)
 	if !attempt.fallback {
 		return exit
 	}

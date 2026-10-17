@@ -2,14 +2,17 @@ package switchyard
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 var errResultConflict = errors.New("local files changed since capture; worker patch was not applied")
@@ -64,12 +67,11 @@ func patchEnvironment(index string) []string {
 // External editors do not take it: this is not a multi-file filesystem
 // transaction, and arbitrary concurrent writes or I/O failures can still race
 // Git's final preimage checks. Never retry an application after a write failure.
-func returnWorkerEdits(home, root string, captured capture, patch []byte) error {
+func returnWorkerEdits(home, root string, captured capture, patch []byte, outputs ...string) error {
 	if len(patch) == 0 || len(patch) > maxPatchSize {
 		return errors.New("worker patch is empty or too large")
 	}
-	digest := sha256.Sum256([]byte(root))
-	lockDir := filepath.Join(home, "workspace-locks", hex.EncodeToString(digest[:]))
+	lockDir := workspaceLockDir(home, root)
 	return withProjectLock(lockDir, func() error {
 		stage, err := os.MkdirTemp(lockDir, "return-")
 		if err != nil {
@@ -116,7 +118,7 @@ func returnWorkerEdits(home, root string, captured capture, patch []byte) error 
 		for i := 0; i < len(parts)-1; i += 2 {
 			fields := strings.Fields(string(parts[i]))
 			path := string(parts[i+1])
-			if len(fields) != 5 || fields[1] != "000000" && fields[1] != "100644" && fields[1] != "100755" || safeRel(path) != nil || excludedPath(path) {
+			if len(fields) != 5 || fields[1] != "000000" && fields[1] != "100644" && fields[1] != "100755" || safeRel(path) != nil || excludedPath(path) || validateOutputInputs(outputs, []fileEntry{{Path: path}}) != nil {
 				return errors.New("worker patch changes an unsupported path or file type")
 			}
 			if err := checkReturnPath(root, path); err != nil {
@@ -150,6 +152,11 @@ func returnWorkerEdits(home, root string, captured capture, patch []byte) error 
 	})
 }
 
+func workspaceLockDir(home, root string) string {
+	digest := sha256.Sum256([]byte(root))
+	return filepath.Join(home, "workspace-locks", hex.EncodeToString(digest[:]))
+}
+
 func checkReturnPath(root, path string) error {
 	current := root
 	components := append([]string{""}, strings.Split(path, "/")...)
@@ -177,4 +184,66 @@ func recordEditReturn(home, job, state string) error {
 		return err
 	}
 	return writeAtomic(filepath.Join(home, "runs", job+".json"), append(content, '\n'))
+}
+
+func receiveEdits(ctx context.Context, provider shellProvider, home, job, root string, captured capture, status jobRecord, attempt *jobAttempt, autoApply, proxy bool, outputs []string) {
+	attempt.phase = "patch"
+	saveReturn := func(state string) {
+		if err := recordEditReturn(home, job, state); err != nil {
+			logEvent(home, "edit-return", "record-failed", time.Time{})
+		}
+	}
+	if status.HasEdits {
+		var patch []byte
+		err := attempt.retry(ctx, "patch", func(ctx context.Context) error {
+			var patchErr error
+			_, patch, patchErr = provider.Call(ctx, []string{"patch", "--project", status.Project, "--job", job}, false)
+			return patchErr
+		})
+		if err != nil || len(patch) == 0 || len(patch) > maxPatchSize {
+			logEvent(home, "patch", "retrieve-failed", time.Time{})
+			saveReturn("failed")
+			if !attempt.automatic {
+				fmt.Fprintln(os.Stderr, "switchyard: could not retrieve worker edits; preserving command exit status")
+			}
+			return
+		}
+		path := filepath.Join(home, "runs", job+".patch")
+		if err := writeAtomic(path, patch); err != nil {
+			logEvent(home, "patch", "save-failed", time.Time{})
+			saveReturn("failed")
+			if !attempt.automatic {
+				fmt.Fprintln(os.Stderr, "switchyard: could not save worker edits; preserving command exit status")
+			}
+			return
+		}
+		state := "review"
+		if autoApply {
+			// Record the in-progress state before changing the caller's files.
+			// An interrupted publication must not look like a successful return.
+			err := recordEditReturn(home, job, "applying")
+			if err == nil {
+				err = returnWorkerEdits(home, root, captured, patch, outputs...)
+			}
+			state = "applied"
+			if err != nil {
+				state = "failed"
+				if errors.Is(err, errResultConflict) {
+					state = "conflict"
+				}
+				fmt.Fprintf(os.Stderr, "switchyard: edit return %s; review %s; preserving command exit status\n", state, path)
+			}
+		}
+		saveReturn(state)
+		logEvent(home, "edit-return", state, time.Time{})
+		if !proxy {
+			fmt.Printf("Worker edits: %s (%s)\n", path, state)
+		}
+	} else if status.EditsError == "" {
+		saveReturn("none")
+	}
+	if status.EditsError != "" {
+		logEvent(home, "patch", "collection-failed", time.Time{})
+		saveReturn("failed")
+	}
 }

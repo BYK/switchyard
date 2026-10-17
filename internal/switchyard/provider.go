@@ -371,6 +371,9 @@ func (provider shellProvider) call(ctx context.Context, request wireRequest, str
 	if len(request.Args) > 0 && request.Args[0] == "patch" {
 		limit = maxPatchSize
 	}
+	if len(request.Args) > 0 && request.Args[0] == "artifacts" {
+		limit = maxArtifactBundle
+	}
 	buffer := &responseBuffer{limit: limit}
 	cmd.Stdout = buffer
 	err = cmd.Run()
