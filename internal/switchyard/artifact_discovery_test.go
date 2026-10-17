@@ -76,7 +76,7 @@ func TestArtifactAutomaticDiscoveryAndReturn(t *testing.T) {
 		t.Fatal(err)
 	}
 	patch := filepath.Join(t.TempDir(), "changes.patch")
-	if reason := collectPatch(captured.Tree, remote, patch, outputs...); reason != "" {
+	if reason := collectPatch(captured.Tree, remote, patch, captured.Manifest.Files, outputs...); reason != "" {
 		t.Fatal(reason)
 	}
 	data := resultRead(t, patch)

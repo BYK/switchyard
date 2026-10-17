@@ -226,7 +226,7 @@ func TestPatchIgnoresLargeWorkerPnpmStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	patch := filepath.Join(root, "changes.patch")
-	if reason := collectPatch(original, checkout, patch); reason != "" {
+	if reason := collectPatch(original, checkout, patch, patchFixtureInputs(t, original)); reason != "" {
 		t.Fatalf("cache blocked patch collection: %s", reason)
 	}
 	data, err := os.ReadFile(patch)

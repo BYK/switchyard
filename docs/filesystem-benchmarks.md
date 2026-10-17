@@ -14,11 +14,20 @@ The `Filesystem experiments` workflow runs on every PR and main push, on an Ubun
 | --- | --- |
 | `BenchmarkSnapshotCapture` | Selection, copy/clone, frozen-content hash and live-source validation; capture cleanup excluded |
 | `BenchmarkCheckoutRoundTrip` | Copy/clone/FUSE mount, one file read and a README edit, actual Git patch collection, unmount and directory removal; individual phase timings included |
+| `BenchmarkPatchCollection` | Unchanged, small-text-edit and binary-edit patch collection; paired full-tree and selective collectors on identical inputs; checkout preparation and outer job cleanup excluded |
 | `BenchmarkDispatchArtifacts` | Actual local-provider CLI dispatch, capture, mirror preparation, rsync, command execution, automatic ignored-output return, and worker cleanup |
 
 Fixtures contain 128 source-like text files totaling 2 MiB, four distinct binary files totaling 64 MiB, or 2,048 small text files totaling 8 MiB. The dependency capture fixture adds 8 MiB under excluded `node_modules`; it checks selection cost, not dependency installation. Inputs are synthetic. Cold/warm dispatch describes worker mirror state, not the OS page cache. The small-edit dispatch modifies input after an untimed priming run. The command writes an ignored artifact and checks that it reaches the invoking worktree before dispatch returns.
 
 Each CI case runs three one-iteration samples. These are exploratory timings on shared runners, not performance thresholds. `proc-write-B/op` comes from `/proc/self/io` and includes accounted child-process writes after waiting; it is not peak disk usage, exclusive extent usage or network bytes. Buffered writeback and FUSE daemon accounting can differ. Filesystem tests and benchmarks operate entirely on disposable fixture directories.
+
+## Selective patch collection
+
+Workers automatically compare checkout content hashes, sizes and executable modes with the input manifest verified before execution. Only added, changed and deleted files enter a temporary Git repository. Unchanged source files are still scanned and hashed, but are no longer copied into Git objects. An unchanged checkout produces an empty patch. New files obey checkout ignore rules; explicitly captured files remain tracked even when ignored. Private paths and artifact roots stay excluded.
+
+Changed preimages and postimages are copied or cloned into private staging and checked against their scanned hashes before Git reads them. Staging and its Git objects are removed when collection returns, including on failure. A failed collection retains the job's original input and checkout through the existing recovery mechanism. Git attributes cannot run content filters, and binary patches retain the existing transport format. Collection is still a post-command operation, not an atomic snapshot of concurrently changing background processes.
+
+The test-only `full-tree` collector preserves the implementation from PR #14 as a compatibility and performance baseline. `BenchmarkCheckoutRoundTrip/…/auto-full-tree` and `/auto` compare complete loops with the same automatic checkout copying. `BenchmarkPatchCollection` isolates collection; selective staging cleanup is included, while legacy Git-data cleanup is deferred to outer job cleanup. This comparison therefore does not hide the selective collector's cleanup cost. Client-side source-patch application still stages the full captured tree; this optimization only changes worker collection.
 
 ## FUSE scope
 
@@ -69,7 +78,7 @@ On Linux with Go, Git and rsync:
 ```sh
 go test -race ./...
 go test ./internal/switchyard -run '^$' \
-  -bench 'Benchmark(SnapshotCapture|CheckoutRoundTrip)$' -benchtime=1x -count=3
+  -bench 'Benchmark(SnapshotCapture|CheckoutRoundTrip|PatchCollection)$' -benchtime=1x -count=3
 ```
 
 On a host with `/dev/fuse`, `fuse-overlayfs` and `fusermount3`, and a normal process namespace:
@@ -78,7 +87,7 @@ On a host with `/dev/fuse`, `fuse-overlayfs` and `fusermount3`, and a normal pro
 SWITCHYARD_TEST_FUSE=1 go test ./internal/switchyard -run 'Test(FUSE|Reflink)' -v
 SWITCHYARD_TEST_FUSE=1 SWITCHYARD_BENCH_DISPATCH=1 \
   go test ./internal/switchyard -run '^$' \
-  -bench 'Benchmark(SnapshotCapture|CheckoutRoundTrip|DispatchArtifacts)$' \
+  -bench 'Benchmark(SnapshotCapture|CheckoutRoundTrip|PatchCollection|DispatchArtifacts)$' \
   -benchtime=1x -count=3
 ```
 

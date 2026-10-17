@@ -119,7 +119,7 @@ func TestFUSECheckoutIsolation(t *testing.T) {
 		t.Fatal("FUSE chmod changed immutable base")
 	}
 	patch := filepath.Join(root, "changes.patch")
-	if reason := collectPatch(base, view, patch); reason != "" {
+	if reason := collectPatch(base, view, patch, patchFixtureInputs(t, base)); reason != "" {
 		t.Fatal(reason)
 	}
 	data := resultRead(t, patch)
@@ -256,7 +256,7 @@ func BenchmarkSnapshotCapture(b *testing.B) {
 // including FUSE mount and unmount. It is not a network or cloud benchmark.
 func BenchmarkCheckoutRoundTrip(b *testing.B) {
 	for _, sample := range filesystemFixtures[:3] {
-		for _, method := range []string{"copy", "auto", "fuse"} {
+		for _, method := range []string{"copy", "auto", "auto-full-tree", "fuse"} {
 			b.Run(sample.name+"/"+method, func(b *testing.B) {
 				if method == "fuse" && os.Getenv("SWITCHYARD_TEST_FUSE") != "1" {
 					b.Skip("FUSE experiment disabled")
@@ -285,7 +285,7 @@ func BenchmarkCheckoutRoundTrip(b *testing.B) {
 						cleanup, err = fuseCheckout(base, checkout, filepath.Join(job, "overlay"))
 					} else {
 						var clone fileCloner
-						if method == "auto" {
+						if method != "copy" {
 							clone = cloneFile
 						}
 						err = copyTreeWithClone(base, checkout, clone)
@@ -316,7 +316,11 @@ func BenchmarkCheckoutRoundTrip(b *testing.B) {
 					}
 					commandTime += time.Since(started)
 					started = time.Now()
-					if reason := collectPatch(base, checkout, filepath.Join(job, "result.patch")); reason != "" {
+					collect := collectPatch
+					if method == "auto-full-tree" {
+						collect = collectPatchFullTreeBaseline
+					}
+					if reason := collect(base, checkout, filepath.Join(job, "result.patch"), captured.Manifest.Files); reason != "" {
 						b.Fatal(reason)
 					}
 					resultTime += time.Since(started)
