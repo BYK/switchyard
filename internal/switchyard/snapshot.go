@@ -256,6 +256,10 @@ func snapshotHash(m manifest) (string, error) {
 }
 
 func captureFiles(start string, includes []string, home string) (result capture, chosen selection, captureErr error) {
+	return captureFilesWithClone(start, includes, home, cloneFile)
+}
+
+func captureFilesWithClone(start string, includes []string, home string, clone fileCloner) (result capture, chosen selection, captureErr error) {
 	chosen, err := selectFiles(start, includes)
 	if err != nil {
 		return capture{}, selection{}, err
@@ -292,13 +296,22 @@ func captureFiles(start string, includes []string, home string) (result capture,
 			file.Close()
 			return capture{}, selection{}, err
 		}
-		output, err := os.OpenFile(dest, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		output, err := os.OpenFile(dest, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
 		if err != nil {
 			file.Close()
 			return capture{}, selection{}, err
 		}
 		hash := sha256.New()
-		written, copyErr := io.Copy(io.MultiWriter(output, hash), io.LimitReader(file, maxFileSize+1))
+		cloned, copyErr := prepareClone(output, file, clone)
+		var written int64
+		if copyErr == nil {
+			if cloned {
+				// Hash the frozen clone, not a second view of the live file.
+				written, copyErr = io.Copy(hash, io.LimitReader(output, maxFileSize+1))
+			} else {
+				written, copyErr = io.Copy(io.MultiWriter(output, hash), io.LimitReader(file, maxFileSize+1))
+			}
+		}
 		closeErr := output.Close()
 		after, statErr := file.Stat()
 		file.Close()

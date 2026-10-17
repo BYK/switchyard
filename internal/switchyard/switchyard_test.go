@@ -529,8 +529,8 @@ func TestShellEntrypointRoutesAbsoluteToolAndPreservesOtherShellSyntax(t *testin
 	if status != 37 || stdout != "from worker\n" || stderr != "" {
 		t.Fatalf("absolute tool was not transparently routed: %d %q %q", status, stdout, stderr)
 	}
-	if _, err := os.Stat(filepath.Join(root, "agent-note.txt")); !os.IsNotExist(err) {
-		t.Fatal("remote edits reached the live source")
+	if content, err := os.ReadFile(filepath.Join(root, "agent-note.txt")); err != nil || string(content) != "remote edit\n" {
+		t.Fatalf("shell did not return worker edits: %q %v", content, err)
 	}
 	status, stdout, stderr = run("printf 'local' | tr a-z A-Z")
 	if status != 0 || stdout != "LOCAL" || stderr != "" {

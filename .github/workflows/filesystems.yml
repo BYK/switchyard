@@ -1,0 +1,76 @@
+name: Filesystem experiments
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  filesystems:
+    name: Filesystems (${{ matrix.storage }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        storage: [native, btrfs]
+    env:
+      SWITCHYARD_TEST_FUSE: '1'
+      SWITCHYARD_BENCH_DISPATCH: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Prepare disposable filesystems
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends rsync fuse-overlayfs fuse3 btrfs-progs
+          test -c /dev/fuse
+          test -r /dev/fuse && test -w /dev/fuse
+          storage_root=$(mktemp -d "$RUNNER_TEMP/switchyard-filesystem.XXXXXXXX")
+          echo "STORAGE_ROOT=$storage_root" >> "$GITHUB_ENV"
+          mkdir "$storage_root/data"
+          if [[ '${{ matrix.storage }}' == btrfs ]]; then
+            truncate -s 4G "$storage_root/btrfs.img"
+            mkfs.btrfs -q "$storage_root/btrfs.img"
+            sudo mount -o loop "$storage_root/btrfs.img" "$storage_root/data"
+            sudo chown "$(id -u):$(id -g)" "$storage_root/data"
+            echo 'SWITCHYARD_REQUIRE_REFLINK=1' >> "$GITHUB_ENV"
+          fi
+          echo "TMPDIR=$storage_root/data" >> "$GITHUB_ENV"
+          findmnt -T "$storage_root/data"
+          uname -r
+          fuse-overlayfs --version
+      - name: Check copy-on-write and FUSE isolation
+        run: go test -race ./internal/switchyard -run 'Test(Copy|CaptureClone|Reflink|FUSE)' -count=1 -v -timeout=3m
+      - name: Measure capture and complete checkout lifetimes
+        shell: bash
+        run: |
+          go test ./internal/switchyard -run '^$' -bench 'Benchmark(SnapshotCapture|CheckoutRoundTrip|DispatchArtifacts)$' -benchtime=1x -count=3 -timeout=12m | tee "$RUNNER_TEMP/filesystems-${{ matrix.storage }}.txt"
+      - name: Save benchmark results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: filesystems-${{ matrix.storage }}
+          path: ${{ runner.temp }}/filesystems-${{ matrix.storage }}.txt
+          if-no-files-found: ignore
+      - name: Unmount disposable Btrfs filesystem
+        if: always() && matrix.storage == 'btrfs'
+        shell: bash
+        run: |
+          if [[ -n '${{ env.STORAGE_ROOT }}' ]] && mountpoint -q '${{ env.STORAGE_ROOT }}/data'; then
+            sudo umount '${{ env.STORAGE_ROOT }}/data'
+          fi
