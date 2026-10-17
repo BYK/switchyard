@@ -28,13 +28,15 @@ printf '%s\n' '#!/bin/sh' 'exit 44' > "$root/bin/alternate-pnpm"
 chmod 0755 "$root/bin/pnpm" "$root/bin/alternate-pnpm"
 
 export SWITCHYARD_HOME="$root/state" SWITCHYARD_BASH_PROXY="$switchyard_go" SWITCHYARD_BACKEND=probe
+# Exercise the explicit review-only mode; Go integration tests cover automatic return.
+export SWITCHYARD_RETURN_MODE=patch
 export PATH="$root/bin:$PATH"
 "$switchyard_go" worker --root "$root/worker" init
 "$switchyard_go" backend add --name probe --kind local --root "$root/worker" --priority 10 > /dev/null
 preview_snapshot() {
   local actual expected
   actual=$("$switchyard_go" preview --repo "$root/repo")
-  expected=$'Snapshot: 5 files; 1 private paths excluded\n  + .gitignore\n  + README.md\n  + new.txt\n  + package.json\n  + pnpm-lock.yaml\n  - .env (excluded)'
+  expected=$'Snapshot: 5 files; 1 private paths excluded\n  + .gitignore\n  + README.md\n  + new.txt\n  + package.json\n  + pnpm-lock.yaml\n  - .env (excluded)\n  outputs: discover generated ignored paths automatically'
   if [[ $actual != "$expected" ]]; then
     printf 'The disposable worktree selection changed:\n%s\n' "$actual" >&2
     exit 1
@@ -55,7 +57,7 @@ if [[ $status -ne 37 || -e $root/repo/agent-note.txt ]]; then
   exit 1
 fi
 session=$(< "$root/session.log")
-if [[ $session != *"cwd=$root/worker/"* || $session != *'1 private paths excluded'* ]]; then
+if [[ $session != *"cwd=$root/worker/"* || $session == *'Snapshot:'* ]]; then
   printf 'Interactive Bash did not execute against the selected worker tree\n' >&2
   exit 1
 fi

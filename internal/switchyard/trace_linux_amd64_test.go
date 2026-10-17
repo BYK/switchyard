@@ -62,7 +62,7 @@ func TestTraceShellRoutesOneExecAndPreservesLocalCommands(t *testing.T) {
 		if err != nil {
 			t.Fatalf("preview failed: %v", err)
 		}
-		expected := "Snapshot: 5 files; 1 private paths excluded\n  + .gitignore\n  + README.md\n  + new.txt\n  + package.json\n  + pnpm-lock.yaml\n  - .env (excluded)\n"
+		expected := "Snapshot: 5 files; 1 private paths excluded\n  + .gitignore\n  + README.md\n  + new.txt\n  + package.json\n  + pnpm-lock.yaml\n  - .env (excluded)\n  outputs: discover generated ignored paths automatically\n"
 		if _, err := os.Stat(filepath.Join(root, "agent-note.txt")); err == nil {
 			expected = strings.Replace(expected, "Snapshot: 5", "Snapshot: 6", 1)
 			expected = strings.Replace(expected, "  + README.md\n", "  + README.md\n  + agent-note.txt\n", 1)
