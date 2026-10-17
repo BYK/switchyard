@@ -319,11 +319,15 @@ func TestEditReturnCLI(t *testing.T) {
 // publishes a known patch/status through the real worker protocol. It isolates
 // the client return contract from Linux process-group supervision (which is
 // exercised by the worker tests), so it also works in restricted PID namespaces.
-func resultAdapter(t *testing.T, executable, patchPath string) string {
+func resultAdapter(t *testing.T, executable, patchPath string, artifacts ...string) string {
 	t.Helper()
+	archive := ""
+	if len(artifacts) != 0 {
+		archive = artifacts[0]
+	}
 	path := filepath.Join(t.TempDir(), "provider")
 	recoveryWrite(t, path, `#!/usr/bin/env python3
-import base64, json, os, pathlib, shutil, subprocess, sys
+import base64, hashlib, json, os, pathlib, shutil, subprocess, sys, tarfile
 if sys.argv[1:] == ['--version']:
     print('switchyard-provider-v1')
     sys.exit(0)
@@ -331,6 +335,15 @@ root = pathlib.Path(sys.argv[3])
 request = sys.stdin.buffer.readline() if sys.argv[4:] == ['wire'] else b''
 payload = json.loads(request) if request else {}
 args = payload.get('args', sys.argv[4:])
+archive = `+strconv.Quote(archive)+`
+mode = os.environ.get('ARTIFACT_TEST_MODE', '')
+if mode == 'legacy' and args[0] == 'artifact-support': sys.exit(11)
+if mode == 'patch-fails' and args[0] == 'patch': sys.exit(11)
+if args[0] == 'artifacts' and mode in ['transport', 'truncated', 'tampered']:
+    if mode == 'transport': sys.exit(11)
+    data = pathlib.Path(archive).read_bytes()
+    sys.stdout.buffer.write(data[:len(data)//2] if mode == 'truncated' else data[:-1]+bytes([data[-1]^1]))
+    sys.exit(0)
 if sys.argv[1] == 'sync':
     args = sys.argv[4:]
     source = args[args.index('--source')+1]
@@ -345,12 +358,34 @@ if args[0] == 'execute':
     manifest = json.loads((checkout/'.switchyard-manifest.json').read_text())
     assert manifest['snapshot'] == args[args.index('--snapshot')+1]
     assert (checkout/'README.md').read_bytes() == b'original\n'
+    if archive: assert not (checkout/'dist').exists() and not (checkout/'report.txt').exists()
     environment = dict(base64.b64decode(entry).decode().split('=', 1) for entry in payload['environment'])
     completed = subprocess.run(args[args.index('--')+1:], cwd=checkout/args[args.index('--cwd')+1], env=environment, stdin=sys.stdin.buffer)
     assert (checkout/'README.md').read_bytes() == b'remote\n'
     shutil.copyfile(`+strconv.Quote(patchPath)+`, directory/'changes.patch')
     (directory/'changes.patch').chmod(0o600)
     record = {'id':job, 'project':project, 'snapshot':manifest['snapshot'], 'state':'finished', 'exit_status':completed.returncode, 'has_edits':True}
+    if archive:
+        outputs = [args[i+1] for i, arg in enumerate(args[:args.index('--')]) if arg == '--output']
+        if not outputs:
+            with tarfile.open(archive) as bundle:
+                outputs = json.load(bundle.extractfile('manifest.json'))['outputs']
+        record['outputs'] = outputs
+        if mode == 'collect-fails':
+            record['artifact_error'] = 'could not collect complete declared outputs'
+        else:
+            with tarfile.open(archive) as bundle:
+                metadata = json.load(bundle.extractfile('manifest.json'))
+                assert metadata['outputs'] == outputs
+                for entry in metadata['entries']:
+                    output = checkout/entry['path']
+                    if entry['kind'] == 'directory': assert output.is_dir()
+                    else:
+                        assert output.read_bytes() == bundle.extractfile('files/'+entry['path']).read()
+            data = pathlib.Path(archive).read_bytes()
+            (directory/'artifacts.tar').write_bytes(data)
+            (directory/'artifacts.tar').chmod(0o600)
+            record['artifact_sha256'], record['artifact_size'] = hashlib.sha256(data).hexdigest(), len(data)
     (directory/'job.json').write_text(json.dumps(record))
     (directory/'job.json').chmod(0o600)
     sys.exit(completed.returncode)
