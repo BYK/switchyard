@@ -226,7 +226,7 @@ func TestPatchIgnoresLargeWorkerPnpmStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	patch := filepath.Join(root, "changes.patch")
-	if reason := collectPatch(original, checkout, patch); reason != "" {
+	if reason := collectPatch(original, checkout, patch, patchFixtureInputs(t, original)); reason != "" {
 		t.Fatalf("cache blocked patch collection: %s", reason)
 	}
 	data, err := os.ReadFile(patch)
@@ -529,8 +529,8 @@ func TestShellEntrypointRoutesAbsoluteToolAndPreservesOtherShellSyntax(t *testin
 	if status != 37 || stdout != "from worker\n" || stderr != "" {
 		t.Fatalf("absolute tool was not transparently routed: %d %q %q", status, stdout, stderr)
 	}
-	if _, err := os.Stat(filepath.Join(root, "agent-note.txt")); !os.IsNotExist(err) {
-		t.Fatal("remote edits reached the live source")
+	if content, err := os.ReadFile(filepath.Join(root, "agent-note.txt")); err != nil || string(content) != "remote edit\n" {
+		t.Fatalf("shell did not return worker edits: %q %v", content, err)
 	}
 	status, stdout, stderr = run("printf 'local' | tr a-z A-Z")
 	if status != 0 || stdout != "LOCAL" || stderr != "" {
@@ -854,11 +854,11 @@ func TestHookPreservesLocalCommandAndRoutesConfiguredBackend(t *testing.T) {
 	remote := exec.Command(shim, "test")
 	remote.Dir, remote.Env = root, append(os.Environ(), "SWITCHYARD_HOME="+home, "SWITCHYARD_BACKEND=fixture", "PATH="+path)
 	result, err := remote.CombinedOutput()
-	if err == nil || err.(*exec.ExitError).ExitCode() != 37 || !strings.Contains(string(result), "exit 37") {
+	if err == nil || err.(*exec.ExitError).ExitCode() != 37 || len(result) != 0 {
 		t.Fatalf("eligible command was not routed: %v %s", err, result)
 	}
-	if _, err := os.Stat(filepath.Join(root, "agent-note.txt")); !os.IsNotExist(err) {
-		t.Fatal("hook applied worker edits to source")
+	if content, err := os.ReadFile(filepath.Join(root, "agent-note.txt")); err != nil || string(content) != "worker edit\n" {
+		t.Fatal("hook did not return worker edits")
 	}
 	if script, err := exec.LookPath("script"); err == nil {
 		env := append(os.Environ(), "SWITCHYARD_HOME="+home, "SWITCHYARD_BACKEND=fixture", "PATH="+path, "SHELL=/usr/bin/bash")
@@ -869,11 +869,11 @@ func TestHookPreservesLocalCommandAndRoutesConfiguredBackend(t *testing.T) {
 		}
 		shellTTY := exec.Command(script, "-q", "-e", "-c", exe+" hook --shell --resolved "+tool+" -- pnpm test", "/dev/null")
 		shellTTY.Dir, shellTTY.Env = root, env
-		if result, err := shellTTY.CombinedOutput(); err == nil || err.(*exec.ExitError).ExitCode() != 37 || !strings.Contains(string(result), "exit 37") {
+		if result, err := shellTTY.CombinedOutput(); err == nil || err.(*exec.ExitError).ExitCode() != 37 || len(result) != 0 {
 			t.Fatalf("Bash hook did not route a TTY command: %v %q", err, result)
 		}
-		if _, err := os.Stat(filepath.Join(root, "agent-note.txt")); !os.IsNotExist(err) {
-			t.Fatal("Bash hook applied worker edits to source")
+		if content, err := os.ReadFile(filepath.Join(root, "agent-note.txt")); err != nil || string(content) != "worker edit\n" {
+			t.Fatal("Bash hook lost returned worker edits")
 		}
 	}
 	alternative := filepath.Join(toolDir, "alternate-pnpm")

@@ -208,14 +208,20 @@ func awsRequestCapacity(scale bool) {
 		}
 		activity.Demand, activity.LastUse = now, now
 	}); err != nil {
-		fmt.Fprintln(os.Stderr, "switchyard: could not save AWS wake request")
+		home, err := dataHome()
+		if err == nil {
+			logEvent(home, "worker-wake", "save-failed", time.Time{})
+		}
 		return
 	}
 	// Starting the service queues reconciliation without waiting for cloud APIs.
 	cmd := awsSystemctl("--user", "start", "--no-block", "switchyard-autoscale.service")
 	cmd.Stdin = bytes.NewReader(nil)
 	if cmd.Run() != nil {
-		fmt.Fprintln(os.Stderr, "switchyard: could not start AWS autoscale service")
+		home, err := dataHome()
+		if err == nil {
+			logEvent(home, "worker-wake", "queue-failed", time.Time{})
+		}
 	}
 }
 

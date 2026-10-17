@@ -197,11 +197,18 @@ func safeRel(path string) error {
 }
 
 func copyFile(source, dest string, mode os.FileMode) error {
-	input, err := os.Open(source)
+	return copyFileWithClone(source, dest, mode, cloneFile)
+}
+
+func copyFileWithClone(source, dest string, mode os.FileMode, clone fileCloner) (copyErr error) {
+	input, err := os.OpenFile(source, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return err
 	}
 	defer input.Close()
+	if info, err := input.Stat(); err != nil || !info.Mode().IsRegular() {
+		return errors.New("only regular files can be copied")
+	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
 		return err
 	}
@@ -209,15 +216,35 @@ func copyFile(source, dest string, mode os.FileMode) error {
 	if err != nil {
 		return err
 	}
-	_, copyErr := io.Copy(output, input)
+	defer func() {
+		output.Close()
+		if copyErr != nil {
+			os.Remove(dest)
+		}
+	}()
+	cloned, err := prepareClone(output, input, clone)
+	if err != nil {
+		return err
+	}
+	if !cloned {
+		_, copyErr = io.Copy(output, input)
+	}
+	modeErr := output.Chmod(mode)
 	closeErr := output.Close()
 	if copyErr != nil {
 		return copyErr
+	}
+	if modeErr != nil {
+		return modeErr
 	}
 	return closeErr
 }
 
 func copyTree(source, dest string) error {
+	return copyTreeWithClone(source, dest, cloneFile)
+}
+
+func copyTreeWithClone(source, dest string, clone fileCloner) error {
 	return filepath.WalkDir(source, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -234,6 +261,6 @@ func copyTree(source, dest string) error {
 		if err != nil || !info.Mode().IsRegular() {
 			return errors.New("only regular files can be copied")
 		}
-		return copyFile(path, target, info.Mode().Perm())
+		return copyFileWithClone(path, target, info.Mode().Perm(), clone)
 	})
 }

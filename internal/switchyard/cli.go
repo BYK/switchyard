@@ -30,10 +30,12 @@ func (paths *includesFlag) Set(path string) error {
 }
 
 type localJob struct {
-	Project  string `json:"project"`
-	Snapshot string `json:"snapshot"`
-	Backend  string `json:"backend"`
-	Endpoint string `json:"endpoint"`
+	Project        string `json:"project"`
+	Snapshot       string `json:"snapshot"`
+	Backend        string `json:"backend"`
+	Endpoint       string `json:"endpoint"`
+	EditReturn     string `json:"edit_return,omitempty"`
+	ArtifactReturn string `json:"artifact_return,omitempty"`
 }
 
 func pruneLocalRecords(home string) error {
@@ -56,6 +58,9 @@ func pruneLocalRecords(home string) error {
 		id := strings.TrimSuffix(entry.Name(), ".json")
 		if err := os.Remove(filepath.Join(path, id+".patch")); err != nil && !os.IsNotExist(err) {
 			return errors.New("could not reclaim old job patch")
+		}
+		if err := os.Remove(filepath.Join(path, id+".artifacts.tar")); err != nil && !os.IsNotExist(err) {
+			return errors.New("could not reclaim old artifact archive")
 		}
 		if err := os.Remove(filepath.Join(path, entry.Name())); err != nil {
 			return errors.New("could not reclaim old job record")
@@ -306,13 +311,29 @@ func listJobs(home string) int {
 		if info, err := os.Lstat(filepath.Join(home, "runs", id+".patch")); err == nil && info.Mode().IsRegular() {
 			patch = " patch=" + filepath.Join(home, "runs", id+".patch")
 		}
-		fmt.Printf("%s %s snapshot=%s%s\n", id, record.Backend, record.Snapshot, patch)
+		result := ""
+		if record.EditReturn != "" {
+			result = " edits=" + record.EditReturn
+		}
+		if record.ArtifactReturn != "" {
+			result += " artifacts=" + record.ArtifactReturn
+		}
+		if info, err := os.Lstat(filepath.Join(home, "runs", id+".artifacts.tar")); err == nil && info.Mode().IsRegular() {
+			result += " archive=" + filepath.Join(home, "runs", id+".artifacts.tar")
+		}
+		fmt.Printf("%s %s snapshot=%s%s%s\n", id, record.Backend, record.Snapshot, result, patch)
 	}
 	return 0
 }
 
 func parsedStatus(provider shellProvider, project, job string) (jobRecord, error) {
-	_, response, err := provider.Call(context.Background(), []string{"status", "--project", project, "--job", job}, false)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	return parsedStatusContext(ctx, provider, project, job)
+}
+
+func parsedStatusContext(ctx context.Context, provider shellProvider, project, job string) (jobRecord, error) {
+	_, response, err := provider.Call(ctx, []string{"status", "--project", project, "--job", job}, false)
 	if err != nil {
 		return jobRecord{}, err
 	}
@@ -320,10 +341,23 @@ func parsedStatus(provider shellProvider, project, job string) (jobRecord, error
 	if json.Unmarshal(response, &status) != nil || status.ID != job || status.Project != project {
 		return jobRecord{}, errors.New("worker returned an invalid job status")
 	}
+	if status.ExitStatus != nil && (*status.ExitStatus < 0 || *status.ExitStatus > 255) || status.SetupStatus != nil && (*status.SetupStatus < 0 || *status.SetupStatus > 255) {
+		return jobRecord{}, errors.New("invalid worker command exit status")
+	}
 	return status, nil
 }
 
-func executeJob(home, self, start, backend string, includes, required []string, argv []string, details, proxy bool) int {
+func executeJobAttempt(home, self, start, backend string, includes, required []string, argv []string, details, proxy bool, attempt *jobAttempt, outputFlags ...string) int {
+	autoApply, err := applyResults(proxy)
+	if err != nil {
+		// Invalid configuration must not silently execute the command locally.
+		return fail(err)
+	}
+	outputs, err := declaredOutputs(outputFlags)
+	if err != nil {
+		return fail(err)
+	}
+	fail := attempt.fail
 	if len(argv) == 0 {
 		return fail(errors.New("supply a command after --"))
 	}
@@ -341,6 +375,7 @@ func executeJob(home, self, start, backend string, includes, required []string, 
 	if err != nil {
 		return fail(err)
 	}
+	provider.quiet = attempt.automatic
 	if isAWSWorker(provider.Name()) {
 		dir, dirErr := awsDirectory()
 		if dirErr != nil {
@@ -372,27 +407,26 @@ func executeJob(home, self, start, backend string, includes, required []string, 
 			// idle timestamp only after this dispatch has fully completed.
 			defer func() {
 				if err := awsNoteWorkerUse(dir, provider.Name()); err != nil {
-					fmt.Fprintln(os.Stderr, "switchyard: AWS worker activity could not be saved")
+					logEvent(home, "worker-activity", "save-failed", time.Time{})
 				}
 			}()
 		}
 	}
-	if proxy && backend == "auto" {
-		fmt.Fprintf(os.Stderr, "switchyard: automatic routing to %s (%s)\n", provider.Name(), reason)
+	if attempt.automatic {
+		placement := "remote"
+		if provider.Name() == "local" {
+			placement = "local"
+		}
+		logEvent(home, "placement", placement, started)
 	}
 	if proxy && provider.Name() == "local" {
-		path, err := exec.LookPath(argv[0])
-		if err != nil {
-			return fail(errors.New("could not locate local command"))
-		}
-		if err := syscall.Exec(path, argv, os.Environ()); err != nil {
-			return fail(errors.New("could not start local command"))
-		}
+		attempt.fallback = true
 		return 0
 	}
 	if err := pruneLocalRecords(home); err != nil {
 		return fail(err)
 	}
+	attempt.phase = "snapshot"
 	chosen, err := selectFiles(start, includes)
 	if err != nil {
 		return fail(err)
@@ -409,6 +443,19 @@ func executeJob(home, self, start, backend string, includes, required []string, 
 		return fail(err)
 	}
 	defer os.RemoveAll(filepath.Dir(captured.Tree))
+	if err := validateOutputInputs(outputs, captured.Manifest.Files); err != nil {
+		return fail(err)
+	}
+	var artifactBaseline artifactManifest
+	var automaticArtifacts *automaticArtifactBaseline
+	if len(outputs) != 0 {
+		artifactBaseline, err = inspectArtifacts(chosen.Root, outputs, true)
+		if err != nil {
+			return fail(err)
+		}
+	} else {
+		automaticArtifacts = captureAutomaticArtifacts(chosen.Root, captured.Manifest.Files)
+	}
 	if !equalPaths(chosen.Paths, current.Paths) || !equalPaths(chosen.Excluded, current.Excluded) || chosen.Root != current.Root {
 		return fail(errors.New("file selection changed during capture"))
 	}
@@ -421,19 +468,53 @@ func executeJob(home, self, start, backend string, includes, required []string, 
 	if err != nil {
 		return fail(err)
 	}
-	if err := provider.Prepare(context.Background(), project, job); err != nil {
+	setupCtx := context.Background()
+	if attempt.automatic {
+		bounded, cancel := context.WithTimeout(setupCtx, automaticPreparationTimeout)
+		defer cancel()
+		setupCtx = bounded
+	}
+	attempt.phase = "prepare"
+	_, version, err := provider.Call(setupCtx, []string{"artifact-support"}, false)
+	if err != nil || string(version) != "2\n" {
+		return fail(errors.New("worker does not support automatic artifact return"))
+	}
+	executeRequested := false
+	if attempt.automatic {
+		defer func() {
+			if executeRequested {
+				return
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			if _, _, err := provider.Call(ctx, []string{"discard", "--project", project, "--job", job}, false); err != nil {
+				logEvent(home, "preparation-cleanup", "failed", time.Time{})
+			}
+		}()
+	}
+	if err := provider.Prepare(setupCtx, project, job); err != nil {
 		return fail(err)
 	}
-	if err := provider.Sync(context.Background(), captured.Tree, project, job); err != nil {
+	attempt.phase = "transfer"
+	if err := attempt.retry(setupCtx, "transfer", func(ctx context.Context) error {
+		return provider.Sync(ctx, captured.Tree, project, job)
+	}); err != nil {
 		return fail(err)
 	}
-	if err := saveLocalJob(home, job, localJob{Project: project, Snapshot: captured.Snapshot, Backend: provider.Name(), Endpoint: endpointID(provider.cfg)}); err != nil {
+	attempt.phase = "job-record"
+	local := localJob{Project: project, Snapshot: captured.Snapshot, Backend: provider.Name(), Endpoint: endpointID(provider.cfg)}
+	local.ArtifactReturn = "pending"
+	if err := saveLocalJob(home, job, local); err != nil {
 		return fail(err)
 	}
 	if !proxy {
 		fmt.Printf("Job %s; worker command starts after snapshot transfer\n", job)
 	}
-	args := []string{"execute", "--project", project, "--job", job, "--snapshot", captured.Snapshot, "--cwd", chosen.CWD, "--"}
+	args := []string{"execute", "--project", project, "--job", job, "--snapshot", captured.Snapshot, "--cwd", chosen.CWD}
+	for _, output := range outputs {
+		args = append(args, "--output", output)
+	}
+	args = append(args, "--")
 	args = append(args, argv...)
 	ctx, cancelRun := context.WithCancel(context.Background())
 	defer cancelRun()
@@ -451,50 +532,69 @@ func executeJob(home, self, start, backend string, includes, required []string, 
 		case <-done:
 		}
 	}()
-	exit, _, err := provider.Execute(ctx, args, environment)
+	attempt.started = true
+	executeRequested = true
+	attempt.phase = "execute"
+	exit, _, executeErr := provider.Execute(ctx, args, environment)
 	if ctx.Err() != nil {
 		cancelCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 		defer cancel()
 		_, _, cancelErr := provider.Call(cancelCtx, []string{"cancel", "--project", project, "--job", job}, false)
 		if cancelErr != nil {
-			fmt.Fprintln(os.Stderr, "switchyard: worker cancellation could not be confirmed; use switchyard cancel "+job)
+			logEvent(home, "cancellation", "unconfirmed", time.Time{})
 		}
 		return int(interrupted.Load())
 	}
-	if err != nil {
-		return fail(err)
-	}
-	status, err := parsedStatus(provider, project, job)
-	if err == nil && status.State == "setup-failed" && status.Snapshot == captured.Snapshot && status.SetupStatus != nil {
+	attempt.phase = "status"
+	resultCtx, cancelResults := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelResults()
+	var status jobRecord
+	err = attempt.retry(resultCtx, "status", func(ctx context.Context) error {
+		var statusErr error
+		status, statusErr = parsedStatusContext(ctx, provider, project, job)
+		return statusErr
+	})
+	if err == nil && status.State == "setup-failed" && status.Snapshot == captured.Snapshot && status.SetupStatus != nil && status.ExitStatus == nil {
 		if !proxy {
 			fmt.Printf("Job %s: dependency setup failed (exit %d); requested command did not start\n", job, *status.SetupStatus)
+		}
+		if attempt.automatic {
+			// setup-failed is the worker's positive confirmation that the
+			// requested command never started. Only then is fallback safe.
+			attempt.started = false
+			return fail(errors.New("worker dependency setup failed"))
 		}
 		if *status.SetupStatus >= 128 {
 			return *status.SetupStatus
 		}
 		return 2
 	}
-	if err != nil || status.State != "finished" || status.ExitStatus == nil || status.Snapshot != captured.Snapshot || *status.ExitStatus != exit {
+	if err != nil || status.State != "finished" || status.ExitStatus == nil || status.Snapshot != captured.Snapshot {
+		if executeErr == nil {
+			// Auxiliary result retrieval never replaces an execution result,
+			// including for an explicitly selected backend.
+			logEvent(home, "status", "unconfirmed", time.Time{})
+			if !attempt.automatic {
+				fmt.Fprintln(os.Stderr, "switchyard: worker result is unconfirmed; preserving execution exit status")
+			}
+			return exit
+		}
 		return fail(errors.New("worker did not confirm the command exit status and snapshot"))
 	}
-	if status.HasEdits {
-		_, patch, err := provider.Call(context.Background(), []string{"patch", "--project", project, "--job", job}, false)
-		if err != nil || len(patch) > maxPatchSize {
-			return fail(errors.New("could not retrieve worker edits"))
-		}
-		path := filepath.Join(home, "runs", job+".patch")
-		if err := writeAtomic(path, patch); err != nil {
-			return fail(err)
-		}
-		if !proxy {
-			fmt.Printf("Worker edits: %s (review before applying)\n", path)
-		} else if backend == "auto" {
-			fmt.Fprintf(os.Stderr, "switchyard: worker edits saved to %s (review before applying)\n", path)
-		}
+	if executeErr != nil || *status.ExitStatus != exit {
+		// A validated terminal record confirms the original execution; it
+		// never authorizes running the command again after a lost response.
+		logEvent(home, "status", "reconciled", time.Time{})
+		exit = *status.ExitStatus
 	}
-	if status.EditsError != "" {
-		fmt.Fprintln(os.Stderr, "switchyard: "+status.EditsError)
+	patchOutputs := outputs
+	if automaticArtifacts != nil {
+		patchOutputs = status.Outputs
 	}
+	receiveEdits(resultCtx, provider, home, job, chosen.Root, captured, status, attempt, autoApply, proxy, patchOutputs)
+	artifactCtx, cancelArtifacts := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelArtifacts()
+	receiveArtifacts(artifactCtx, provider, home, job, chosen.Root, artifactBaseline, status, attempt, proxy, automaticArtifacts)
 	if provider.cfg.Kind != "local" {
 		executable, lookupErr := exec.LookPath(argv[0])
 		if filepath.Base(argv[0]) == argv[0] {
@@ -507,7 +607,7 @@ func executeJob(home, self, start, backend string, includes, required []string, 
 				if signature, ok := commandSignature(start, absolute, argv[1:]); ok {
 					// A failed observation must never replace a completed job's exit status.
 					if err := recordCommandObservation(home, signature, observedBackendID(provider), time.Since(started), 0); err != nil {
-						fmt.Fprintln(os.Stderr, "switchyard: private command timing could not be saved")
+						logEvent(home, "timing", "save-failed", time.Time{})
 					}
 				}
 			}
@@ -549,10 +649,17 @@ func existingJob(home, self, action, job string) int {
 		exit = strconv.Itoa(*state.ExitStatus)
 	}
 	fmt.Printf("Job %s: %s; snapshot %s; exit %s\n", job, state.State, state.Snapshot, exit)
+	if record.ArtifactReturn != "" {
+		fmt.Printf("Worker artifacts: %s\n", record.ArtifactReturn)
+	}
 	if state.EditsError != "" {
 		fmt.Println("Worker edits: collection failed")
 	} else if state.HasEdits {
-		fmt.Println("Worker edits: available")
+		result := record.EditReturn
+		if result == "" {
+			result = "available"
+		}
+		fmt.Printf("Worker edits: %s\n", result)
 	} else if state.State == "finished" {
 		fmt.Println("Worker edits: none")
 	}
@@ -601,10 +708,10 @@ func printHelp() {
 	fmt.Println("switchyard: frozen worktree execution on local and operator-controlled workers")
 	fmt.Println("  switchyard backend add --name NAME --kind local|ssh|plugin --root PATH [options]")
 	fmt.Println("  switchyard backend list")
-	fmt.Println("  switchyard preview [--repo PATH] [--include PATH]")
-	fmt.Println("  switchyard run [--backend auto|NAME] [--repo PATH] [--include PATH] [--require CAPABILITY] -- COMMAND ARGS...")
-	fmt.Println("  switchyard proxy [--backend auto|NAME] [--repo PATH] -- COMMAND ARGS...")
-	fmt.Println("  switchyard jobs                    list local run IDs and unapplied patches")
+	fmt.Println("  switchyard preview [--repo PATH] [--include PATH] [--output PATH]")
+	fmt.Println("  switchyard run [--backend auto|NAME] [--repo PATH] [--include PATH] [--output PATH] [--require CAPABILITY] -- COMMAND ARGS...")
+	fmt.Println("  switchyard proxy [--backend auto|NAME] [--repo PATH] [--output PATH] -- COMMAND ARGS...")
+	fmt.Println("  switchyard jobs                    list local runs and source/artifact return status")
 	fmt.Println("  switchyard stats [--limit N]       recent command timing samples by backend")
 	fmt.Println("  switchyard status|logs|cancel JOB_ID")
 	fmt.Println("  switchyard hook [--] TOOL ARGS...   (managed PATH shims)")
@@ -618,7 +725,7 @@ func printHelp() {
 	fmt.Println("  switchyard aws auto enable --source ABSOLUTE_PATH [--max-workers 1..4]")
 	fmt.Println("  switchyard aws auto status|tick|disable")
 	fmt.Println("  switchyard container status|stop [--cwd PATH]   (opt-in CWD sandbox)")
-	fmt.Println("  switchyard worker --root PATH init|ready|load|prepare|execute|status|logs|patch|cancel")
+	fmt.Println("  switchyard worker --root PATH init|ready|load|prepare|execute|status|logs|patch|artifacts|artifact-support|cancel")
 }
 
 func Main(args []string) int {
@@ -707,6 +814,8 @@ func Main(args []string) int {
 		flags.Var(&includes, "include", "explicit ignored or oversized file")
 		var required includesFlag
 		flags.Var(&required, "require", "required backend capability, repeatable")
+		var outputs includesFlag
+		flags.Var(&outputs, "output", "override automatic output discovery with worktree-relative roots, repeatable")
 		if err := flags.Parse(args[1:]); err != nil {
 			return 2
 		}
@@ -719,9 +828,19 @@ func Main(args []string) int {
 				return fail(err)
 			}
 			printSelection(chosen, true)
+			declared, err := declaredOutputs(outputs)
+			if err != nil {
+				return fail(err)
+			}
+			for _, path := range declared {
+				fmt.Printf("  output %s (complete replacement)\n", path)
+			}
+			if len(declared) == 0 {
+				fmt.Println("  outputs: discover generated ignored paths automatically")
+			}
 			return 0
 		}
-		return executeJob(home, self, *repo, *backend, includes, required, flags.Args(), true, args[0] == "proxy")
+		return executeJob(home, self, *repo, *backend, includes, required, flags.Args(), true, args[0] == "proxy", outputs...)
 	case "status", "logs", "cancel":
 		if len(args) != 2 {
 			return fail(errors.New("supply exactly one job ID"))
@@ -736,44 +855,54 @@ func Main(args []string) int {
 		rest := flags.Args()
 		var environment []string
 		var stdin io.Reader = os.Stdin
+		quiet := false
+		wired := len(rest) == 1 && rest[0] == "wire"
+		workerFailure := func(err error) int {
+			if wired {
+				logEvent(*root, "worker-protocol", "failed", time.Time{})
+				return 2
+			}
+			return fail(err)
+		}
 		if len(rest) == 1 && rest[0] == "wire" {
 			reader := bufio.NewReader(os.Stdin)
 			line := make([]byte, 0, 4096)
 			for {
 				chunk, readErr := reader.ReadSlice('\n')
 				if len(line)+len(chunk) > maxWireRequest {
-					return fail(errors.New("worker request exceeds its size limit"))
+					return workerFailure(errors.New("worker request exceeds its size limit"))
 				}
 				line = append(line, chunk...)
 				if readErr == nil {
 					break
 				}
 				if readErr != bufio.ErrBufferFull {
-					return fail(errors.New("invalid worker request"))
+					return workerFailure(errors.New("invalid worker request"))
 				}
 			}
 			var request wireRequest
 			if json.Unmarshal(line, &request) != nil || len(request.Args) == 0 {
-				return fail(errors.New("invalid worker request"))
+				return workerFailure(errors.New("invalid worker request"))
 			}
+			quiet = request.Quiet
 			if request.Environment != nil {
 				if request.Args[0] != "execute" {
-					return fail(errors.New("invalid worker request"))
+					return workerFailure(errors.New("invalid worker request"))
 				}
 				environment = make([]string, len(*request.Environment))
 				for i, entry := range *request.Environment {
 					environment[i] = string(entry)
 				}
 				if err := validateEnvironment(environment); err != nil {
-					return fail(err)
+					return workerFailure(err)
 				}
 			}
 			rest = request.Args
 			stdin = reader
 		}
-		status, err := dispatchWorker(*root, rest, environment, stdin)
+		status, err := dispatchWorker(*root, rest, environment, stdin, quiet)
 		if err != nil {
-			return fail(err)
+			return workerFailure(err)
 		}
 		return status
 	case "hook":
@@ -812,9 +941,10 @@ func Main(args []string) int {
 type wireRequest struct {
 	Args        []string  `json:"args"`
 	Environment *[][]byte `json:"environment,omitempty"`
+	Quiet       bool      `json:"quiet,omitempty"`
 }
 
-func dispatchWorker(root string, rest []string, environment []string, stdin io.Reader) (int, error) {
+func dispatchWorker(root string, rest []string, environment []string, stdin io.Reader, quiet bool) (int, error) {
 	if len(rest) == 0 {
 		return 2, errors.New("worker action required")
 	}
@@ -824,8 +954,13 @@ func dispatchWorker(root string, rest []string, environment []string, stdin io.R
 	job := step.String("job", "", "job ID")
 	snapshot := step.String("snapshot", "", "snapshot hash")
 	cwd := step.String("cwd", ".", "directory within snapshot")
+	var outputs includesFlag
+	step.Var(&outputs, "output", "declared output root")
 	if err := step.Parse(rest[1:]); err != nil {
 		return 2, errors.New("invalid worker request")
 	}
-	return runWorker(root, rest[0], *project, *job, *snapshot, *cwd, step.Args(), environment, stdin)
+	if len(outputs) != 0 && rest[0] != "execute" {
+		return 2, errors.New("outputs are only valid for execution")
+	}
+	return runWorker(root, rest[0], *project, *job, *snapshot, *cwd, step.Args(), environment, stdin, quiet, outputs...)
 }

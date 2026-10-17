@@ -1,7 +1,6 @@
 package switchyard
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,7 +9,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,19 +19,23 @@ import (
 const workerMarker = "switchyard-worker-v1\n"
 
 type jobRecord struct {
-	ID              string `json:"id"`
-	Project         string `json:"project"`
-	Snapshot        string `json:"snapshot"`
-	State           string `json:"state"`
-	ExitStatus      *int   `json:"exit_status"`
-	SetupStatus     *int   `json:"setup_status,omitempty"`
-	Started         string `json:"started"`
-	Finished        string `json:"finished,omitempty"`
-	PID             int    `json:"pid,omitempty"`
-	ProcessIdentity string `json:"process_identity,omitempty"`
-	HasEdits        bool   `json:"has_edits"`
-	EditsError      string `json:"edits_error,omitempty"`
-	LogTruncated    bool   `json:"log_truncated,omitempty"`
+	ID              string   `json:"id"`
+	Project         string   `json:"project"`
+	Snapshot        string   `json:"snapshot"`
+	State           string   `json:"state"`
+	ExitStatus      *int     `json:"exit_status"`
+	SetupStatus     *int     `json:"setup_status,omitempty"`
+	Started         string   `json:"started"`
+	Finished        string   `json:"finished,omitempty"`
+	PID             int      `json:"pid,omitempty"`
+	ProcessIdentity string   `json:"process_identity,omitempty"`
+	HasEdits        bool     `json:"has_edits"`
+	EditsError      string   `json:"edits_error,omitempty"`
+	LogTruncated    bool     `json:"log_truncated,omitempty"`
+	Outputs         []string `json:"outputs,omitempty"`
+	ArtifactHash    string   `json:"artifact_sha256,omitempty"`
+	ArtifactSize    int64    `json:"artifact_size,omitempty"`
+	ArtifactError   string   `json:"artifact_error,omitempty"`
 }
 
 func rootPath(root string) error {
@@ -386,6 +388,8 @@ func workerLoad(root string) (int, error) {
 				}
 			case "starting", "running":
 				active++
+			case "discarded":
+				// A discarded preparation never started a command and holds no result.
 			default:
 				return 0, errors.New("unknown worker job state")
 			}
@@ -428,6 +432,9 @@ func workerFile(root, project, job, name string) ([]byte, error) {
 	limit := int64(maxLogSize)
 	if name == "changes.patch" {
 		limit = maxPatchSize
+	}
+	if name == artifactFile {
+		limit = maxArtifactBundle
 	}
 	return privateRead(filepath.Join(path, name), limit)
 }
@@ -489,7 +496,7 @@ func resolvedWorkerCommand(name, target string, environment []string) (string, e
 	return "", errors.New("worker executable not found in the invocation PATH")
 }
 
-func nodeCommand(checkout, target, marker string, argv, environment []string) (*exec.Cmd, bool, error) {
+func nodeCommand(checkout, target, marker string, argv, environment []string, quiet bool) (*exec.Cmd, bool, error) {
 	manager := filepath.Base(argv[0])
 	if manager != "pnpm" && manager != "npm" {
 		executable, err := resolvedWorkerCommand(argv[0], target, environment)
@@ -519,11 +526,15 @@ func nodeCommand(checkout, target, marker string, argv, environment []string) (*
 	}
 	// The marker is outside the checkout. The real command starts only after
 	// dependency setup succeeds in this same, cancellable process group.
+	silence := ""
+	if quiet {
+		silence = " >/dev/null 2>&1"
+	}
 	script := `cd "$1" || exit 2
 if [ "$2" = pnpm ]; then
-  "$2" install --frozen-lockfile --prefer-offline || exit $?
+  "$2" install --frozen-lockfile --prefer-offline` + silence + ` || exit $?
 else
-  "$2" ci --prefer-offline --no-audit --no-fund || exit $?
+  "$2" ci --prefer-offline --no-audit --no-fund` + silence + ` || exit $?
 fi
 cd "$4" || exit 2
 : > "$3" || exit 2
@@ -547,7 +558,11 @@ func exitStatus(err error) int {
 	return 127
 }
 
-func workerExecute(root, project, job, snapshot, cwd string, argv, environment []string, stdin io.Reader) (int, error) {
+func workerExecute(root, project, job, snapshot, cwd string, argv, environment []string, stdin io.Reader, quiet bool, outputs ...string) (int, error) {
+	outputs, outputErr := normalizeOutputs(outputs)
+	if outputErr != nil {
+		return 2, outputErr
+	}
 	if err := workerReady(root); err != nil {
 		return 2, err
 	}
@@ -564,10 +579,21 @@ func workerExecute(root, project, job, snapshot, cwd string, argv, environment [
 	if err != nil {
 		return 2, err
 	}
+	lease, err := jobExecutionLease(path)
+	if err != nil {
+		return 2, err
+	}
+	defer lease.Close()
+	if _, err := os.Lstat(filepath.Join(path, "job.json")); !os.IsNotExist(err) {
+		return 2, errors.New("job already has execution history")
+	}
 	incoming := filepath.Join(path, "incoming", "files")
 	m, err := verifyTree(incoming)
 	if err != nil || m.Snapshot != snapshot {
 		return 2, errors.New("worker received a different or invalid snapshot")
+	}
+	if err := validateOutputInputs(outputs, m.Files); err != nil {
+		return 2, err
 	}
 	if err := os.Remove(filepath.Join(incoming, manifestName)); err != nil {
 		return 2, errors.New("could not finalize snapshot input")
@@ -581,7 +607,7 @@ func workerExecute(root, project, job, snapshot, cwd string, argv, environment [
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return 2, errors.New("command directory does not exist in the snapshot")
 	}
-	record := jobRecord{ID: job, Project: project, Snapshot: snapshot, State: "starting", Started: time.Now().UTC().Format(time.RFC3339Nano)}
+	record := jobRecord{ID: job, Project: project, Snapshot: snapshot, State: "starting", Started: time.Now().UTC().Format(time.RFC3339Nano), Outputs: outputs}
 	if err := writeJob(path, record); err != nil {
 		return 2, err
 	}
@@ -605,18 +631,31 @@ func workerExecute(root, project, job, snapshot, cwd string, argv, environment [
 	var setup bool
 	var planErr error
 	if image.ID != "" {
-		cmd, setup, planErr = containerJobCommand(root, path, checkout, cwd, argv, environment, image)
+		cmd, setup, planErr = containerJobCommand(root, path, checkout, cwd, argv, environment, image, quiet)
 	} else {
-		cmd, setup, planErr = nodeCommand(checkout, target, filepath.Join(path, "setup-ready"), argv, environment)
+		cmd, setup, planErr = nodeCommand(checkout, target, filepath.Join(path, "setup-ready"), argv, environment, quiet)
 	}
 	if planErr != nil {
-		fmt.Fprintln(logWriter{log: output, stream: os.Stderr}, "switchyard: "+planErr.Error())
+		if quiet {
+			logEvent(root, "command-plan", "failed", time.Time{})
+		} else {
+			fmt.Fprintln(logWriter{log: output, stream: os.Stderr}, "switchyard: "+planErr.Error())
+		}
 		record.State, record.SetupStatus, record.Finished = "setup-failed", new(int), time.Now().UTC().Format(time.RFC3339Nano)
 		*record.SetupStatus = 2
 		if err := log.Close(); err != nil {
 			return 2, errors.New("could not close job log")
 		}
-		return 2, writeJob(path, record)
+		if err := writeAtomic(filepath.Join(path, "changes.patch"), nil); err != nil {
+			record.EditsError = "could not save job patch"
+		}
+		if err := writeJob(path, record); err != nil {
+			return 2, err
+		}
+		if err := releaseJobTrees(path, record); err != nil {
+			logEvent(root, "cleanup", "failed", time.Time{})
+		}
+		return 2, nil
 	}
 	defer func() {
 		for _, file := range cmd.ExtraFiles {
@@ -690,20 +729,35 @@ func workerExecute(root, project, job, snapshot, cwd string, argv, environment [
 		signal.Stop(stops)
 	}
 	if err := log.Close(); err != nil {
-		return 2, errors.New("could not close job log")
+		logEvent(root, "job-log", "close-failed", time.Time{})
 	}
 	record.LogTruncated = output.truncated
-	record.EditsError = collectPatch(incoming, checkout, filepath.Join(path, "changes.patch"))
+	if len(outputs) == 0 {
+		var err error
+		outputs, err = discoverArtifacts(checkout, m.Files)
+		if err != nil {
+			record.ArtifactError = "could not discover complete generated outputs"
+		}
+		record.Outputs = outputs
+	}
+	record.EditsError = collectPatch(incoming, checkout, filepath.Join(path, "changes.patch"), m.Files, outputs...)
 	if record.EditsError == "" {
 		if info, err := os.Stat(filepath.Join(path, "changes.patch")); err == nil {
 			record.HasEdits = info.Size() > 0
 		}
 	}
+	if len(outputs) != 0 && record.ArtifactError == "" {
+		var err error
+		record.ArtifactHash, record.ArtifactSize, err = collectArtifacts(checkout, filepath.Join(path, artifactFile), outputs)
+		if err != nil {
+			record.ArtifactError = "could not collect complete generated outputs"
+		}
+	}
 	// A failed mirror update never changes the result of a completed command.
 	if err := publishMirror(root, project, snapshot, incoming); err != nil {
-		fmt.Fprintln(os.Stderr, "switchyard: worker cache could not be updated")
+		logEvent(root, "mirror", "save-failed", time.Time{})
 	}
-	if setup {
+	if setup || cmd.Process == nil {
 		marker := filepath.Join(path, "setup-ready")
 		if image.ID != "" {
 			marker = filepath.Join(path, "setup", "ready")
@@ -717,7 +771,14 @@ func workerExecute(root, project, job, snapshot, cwd string, argv, environment [
 	}
 	record.Finished = time.Now().UTC().Format(time.RFC3339Nano)
 	if err := writeJob(path, record); err != nil {
-		return 2, err
+		logEvent(root, "job-record", "save-failed", time.Time{})
+		return status, nil
+	}
+	cleanupStarted := time.Now()
+	if err := releaseJobTrees(path, record); err != nil {
+		logEvent(root, "cleanup", "failed", cleanupStarted)
+	} else {
+		logEvent(root, "cleanup", "complete", cleanupStarted)
 	}
 	if record.State == "setup-failed" {
 		if status >= 128 {
@@ -785,7 +846,8 @@ func publishMirror(root, project, snapshot, input string) error {
 func gitWithIndex(index, gitDir, worktree string, args ...string) ([]byte, error) {
 	all := append([]string{"--git-dir=" + gitDir, "--work-tree=" + worktree}, args...)
 	cmd := exec.Command("git", all...)
-	cmd.Env = append(os.Environ(), "GIT_INDEX_FILE="+index, "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+	cmd.Dir = worktree
+	cmd.Env = patchEnvironment(index)
 	result, err := cmd.Output()
 	if err != nil {
 		return nil, errors.New("could not collect worker edits")
@@ -793,127 +855,18 @@ func gitWithIndex(index, gitDir, worktree string, args ...string) ([]byte, error
 	return result, nil
 }
 
-func collectPatch(original, checkout, dest string) string {
-	var total int64
-	if err := filepath.WalkDir(checkout, func(path string, item os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		rel, err := filepath.Rel(checkout, path)
-		if err != nil {
-			return err
-		}
-		if excludedPath(filepath.ToSlash(rel)) {
-			if item.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if item.IsDir() {
-			return nil
-		}
-		info, err := item.Info()
-		if err != nil || !info.Mode().IsRegular() || info.Size() > maxFileSize {
-			return errors.New("worker produced an unsupported edit")
-		}
-		total += info.Size()
-		if total > maxSnapshotSize {
-			return errors.New("worker edits exceed the checkout size limit")
-		}
-		return nil
-	}); err != nil {
-		return "worker edits include an unsupported file or exceed the size limit"
-	}
-	gitDir := filepath.Join(filepath.Dir(checkout), "patch.git")
-	if _, err := runOutput("git", "init", "--bare", "-q", gitDir); err != nil {
-		return "could not prepare patch collection"
-	}
-	index := filepath.Join(filepath.Dir(checkout), "patch-index")
-	if _, err := gitWithIndex(index, gitDir, original, "read-tree", "--empty"); err != nil {
-		return "could not prepare patch collection"
-	}
-	if _, err := gitWithIndex(index, gitDir, original, "add", "--force", "-A", "--", "."); err != nil {
-		return "could not stage original snapshot"
-	}
-	baseline, err := gitWithIndex(index, gitDir, original, "write-tree")
-	if err != nil {
-		return "could not record original snapshot"
-	}
-	tree := strings.TrimSpace(string(baseline))
-	if _, err := gitWithIndex(index, gitDir, checkout, "read-tree", tree); err != nil {
-		return "could not compare worker edits"
-	}
-	// Git must ignore generated caches and private paths before staging: removing
-	// them from the index afterward would still write their bytes to Git objects.
-	patterns := make([]string, 0, len(deniedParts)+len(deniedGlobs))
-	for part := range deniedParts {
-		patterns = append(patterns, "**/"+part)
-	}
-	for _, glob := range deniedGlobs {
-		patterns = append(patterns, "**/"+glob)
-	}
-	sort.Strings(patterns)
-	if err := writeAtomic(filepath.Join(gitDir, "info", "exclude"), []byte(strings.Join(patterns, "\n")+"\n")); err != nil {
-		return "could not exclude private worker files"
-	}
-	if _, err := gitWithIndex(index, gitDir, checkout, "add", "-A", "--", "."); err != nil {
-		return "could not stage worker edits"
-	}
-	paths, err := gitWithIndex(index, gitDir, checkout, "ls-files", "--cached", "-z")
-	if err != nil {
-		return "could not filter worker edits"
-	}
-	private := make([]string, 0)
-	for _, path := range bytes.Split(paths, []byte{0}) {
-		if len(path) > 0 && excludedPath(string(path)) {
-			private = append(private, string(path))
-		}
-	}
-	for len(private) > 0 {
-		count := len(private)
-		if count > 100 {
-			count = 100
-		}
-		args := append([]string{"rm", "--cached", "-q", "-f", "--ignore-unmatch", "--"}, private[:count]...)
-		if _, err := gitWithIndex(index, gitDir, checkout, args...); err != nil {
-			return "could not exclude private worker files"
-		}
-		private = private[count:]
-	}
-	cmd := exec.Command("git", "--git-dir="+gitDir, "--work-tree="+checkout,
-		"diff", "--cached", "--binary", "--no-ext-diff", tree)
-	cmd.Env = append(os.Environ(), "GIT_INDEX_FILE="+index, "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
-	pipe, err := cmd.StdoutPipe()
-	if err != nil {
-		return "could not collect worker patch"
-	}
-	file, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return "could not create worker patch"
-	}
-	if err := cmd.Start(); err != nil {
-		file.Close()
-		return "could not collect worker patch"
-	}
-	written, copyErr := io.Copy(file, io.LimitReader(pipe, maxPatchSize+1))
-	if written > maxPatchSize || copyErr != nil {
-		cmd.Process.Kill()
-	}
-	waitErr := cmd.Wait()
-	closeErr := file.Close()
-	if written > maxPatchSize || copyErr != nil || waitErr != nil || closeErr != nil {
-		os.Remove(dest)
-		return "worker edits exceed the patch limit or cannot be exported"
-	}
-	return ""
-}
-
-func runWorker(root, action, project, job, snapshot, cwd string, argv, environment []string, stdin io.Reader) (int, error) {
+func runWorker(root, action, project, job, snapshot, cwd string, argv, environment []string, stdin io.Reader, quiet bool, outputs ...string) (int, error) {
 	switch action {
 	case "init":
 		return 0, initWorker(root)
 	case "ready":
 		return 0, workerReady(root)
+	case "artifact-support":
+		if err := workerReady(root); err != nil {
+			return 2, err
+		}
+		fmt.Println("2")
+		return 0, nil
 	case "load":
 		active, err := workerLoad(root)
 		if err == nil {
@@ -922,8 +875,10 @@ func runWorker(root, action, project, job, snapshot, cwd string, argv, environme
 		return 0, err
 	case "prepare":
 		return 0, workerPrepare(root, project, job)
+	case "discard":
+		return 0, discardPreparedJob(root, project, job)
 	case "execute":
-		return workerExecute(root, project, job, snapshot, cwd, argv, environment, stdin)
+		return workerExecute(root, project, job, snapshot, cwd, argv, environment, stdin, quiet, outputs...)
 	case "image":
 		if project != "" || job != "" || cwd != "." || len(argv) != 0 {
 			return 2, errors.New("invalid worker image request")
@@ -941,10 +896,13 @@ func runWorker(root, action, project, job, snapshot, cwd string, argv, environme
 			err = json.NewEncoder(os.Stdout).Encode(record)
 		}
 		return 0, err
-	case "logs", "patch":
+	case "logs", "patch", "artifacts":
 		name := "output.log"
 		if action == "patch" {
 			name = "changes.patch"
+		}
+		if action == "artifacts" {
+			name = artifactFile
 		}
 		content, err := workerFile(root, project, job, name)
 		if err == nil {
