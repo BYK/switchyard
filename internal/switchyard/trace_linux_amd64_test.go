@@ -62,7 +62,11 @@ func TestTraceShellRoutesOneExecAndPreservesLocalCommands(t *testing.T) {
 		if err != nil {
 			t.Fatalf("preview failed: %v", err)
 		}
-		const expected = "Snapshot: 5 files; 1 private paths excluded\n  + .gitignore\n  + README.md\n  + new.txt\n  + package.json\n  + pnpm-lock.yaml\n  - .env (excluded)\n"
+		expected := "Snapshot: 5 files; 1 private paths excluded\n  + .gitignore\n  + README.md\n  + new.txt\n  + package.json\n  + pnpm-lock.yaml\n  - .env (excluded)\n"
+		if _, err := os.Stat(filepath.Join(root, "agent-note.txt")); err == nil {
+			expected = strings.Replace(expected, "Snapshot: 5", "Snapshot: 6", 1)
+			expected = strings.Replace(expected, "  + README.md\n", "  + README.md\n  + agent-note.txt\n", 1)
+		}
 		if string(preview) != expected {
 			t.Fatalf("preview changed its selected or excluded paths: %s", preview)
 		}
@@ -90,8 +94,8 @@ func TestTraceShellRoutesOneExecAndPreservesLocalCommands(t *testing.T) {
 	if status != 37 || !strings.Contains(stdout, "worker stdout\n") || !strings.Contains(stderr, "worker stderr\n") {
 		t.Fatalf("exec was not routed with its status and streams: %d %q %q", status, stdout, stderr)
 	}
-	if _, err := os.Stat(filepath.Join(root, "agent-note.txt")); !os.IsNotExist(err) {
-		t.Fatal("traced job changed the local source")
+	if content, err := os.ReadFile(filepath.Join(root, "agent-note.txt")); err != nil || !strings.Contains(string(content), "trace stdin") {
+		t.Fatal("traced job did not return worker edits")
 	}
 	patches, err := filepath.Glob(filepath.Join(home, "runs", "*.patch"))
 	if err != nil || len(patches) != 1 {
@@ -99,7 +103,7 @@ func TestTraceShellRoutesOneExecAndPreservesLocalCommands(t *testing.T) {
 	}
 	patch, err := os.ReadFile(patches[0])
 	if err != nil || !strings.Contains(string(patch), "+late value") || !strings.Contains(string(patch), "+quoted value") || !strings.Contains(string(patch), "+trace stdin") || strings.Contains(string(patch), ".env") {
-		t.Fatalf("unexpected unapplied patch: %v", err)
+		t.Fatalf("unexpected retained patch: %v", err)
 	}
 	// Bash must remain alive to run an EXIT trap, so it forks even this single
 	// foreground command. The routed child must keep Bash's trap and exit status.

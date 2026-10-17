@@ -819,7 +819,8 @@ func publishMirror(root, project, snapshot, input string) error {
 func gitWithIndex(index, gitDir, worktree string, args ...string) ([]byte, error) {
 	all := append([]string{"--git-dir=" + gitDir, "--work-tree=" + worktree}, args...)
 	cmd := exec.Command("git", all...)
-	cmd.Env = append(os.Environ(), "GIT_INDEX_FILE="+index, "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+	cmd.Dir = worktree
+	cmd.Env = patchEnvironment(index)
 	result, err := cmd.Output()
 	if err != nil {
 		return nil, errors.New("could not collect worker edits")
@@ -859,10 +860,18 @@ func collectPatch(original, checkout, dest string) string {
 		return "worker edits include an unsupported file or exceed the size limit"
 	}
 	gitDir := filepath.Join(filepath.Dir(checkout), "patch.git")
-	if _, err := runOutput("git", "init", "--bare", "-q", gitDir); err != nil {
+	index := filepath.Join(filepath.Dir(checkout), "patch-index")
+	init := exec.Command("git", "init", "--bare", "--quiet", "--template=", gitDir)
+	init.Env = patchEnvironment(index)
+	if err := init.Run(); err != nil {
 		return "could not prepare patch collection"
 	}
-	index := filepath.Join(filepath.Dir(checkout), "patch-index")
+	if err := os.MkdirAll(filepath.Join(gitDir, "info"), 0o700); err != nil {
+		return "could not configure patch collection"
+	}
+	if err := configurePatchAttributes(gitDir); err != nil {
+		return "could not configure patch collection"
+	}
 	if _, err := gitWithIndex(index, gitDir, original, "read-tree", "--empty"); err != nil {
 		return "could not prepare patch collection"
 	}
@@ -916,7 +925,8 @@ func collectPatch(original, checkout, dest string) string {
 	}
 	cmd := exec.Command("git", "--git-dir="+gitDir, "--work-tree="+checkout,
 		"diff", "--cached", "--binary", "--no-ext-diff", tree)
-	cmd.Env = append(os.Environ(), "GIT_INDEX_FILE="+index, "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1")
+	cmd.Dir = checkout
+	cmd.Env = patchEnvironment(index)
 	pipe, err := cmd.StdoutPipe()
 	if err != nil {
 		return "could not collect worker patch"

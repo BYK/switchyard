@@ -30,10 +30,11 @@ func (paths *includesFlag) Set(path string) error {
 }
 
 type localJob struct {
-	Project  string `json:"project"`
-	Snapshot string `json:"snapshot"`
-	Backend  string `json:"backend"`
-	Endpoint string `json:"endpoint"`
+	Project    string `json:"project"`
+	Snapshot   string `json:"snapshot"`
+	Backend    string `json:"backend"`
+	Endpoint   string `json:"endpoint"`
+	EditReturn string `json:"edit_return,omitempty"`
 }
 
 func pruneLocalRecords(home string) error {
@@ -306,7 +307,11 @@ func listJobs(home string) int {
 		if info, err := os.Lstat(filepath.Join(home, "runs", id+".patch")); err == nil && info.Mode().IsRegular() {
 			patch = " patch=" + filepath.Join(home, "runs", id+".patch")
 		}
-		fmt.Printf("%s %s snapshot=%s%s\n", id, record.Backend, record.Snapshot, patch)
+		result := ""
+		if record.EditReturn != "" {
+			result = " edits=" + record.EditReturn
+		}
+		fmt.Printf("%s %s snapshot=%s%s%s\n", id, record.Backend, record.Snapshot, result, patch)
 	}
 	return 0
 }
@@ -333,6 +338,11 @@ func parsedStatusContext(ctx context.Context, provider shellProvider, project, j
 }
 
 func executeJobAttempt(home, self, start, backend string, includes, required []string, argv []string, details, proxy bool, attempt *jobAttempt) int {
+	autoApply, err := applyResults(proxy)
+	if err != nil {
+		// Invalid configuration must not silently execute the command locally.
+		return fail(err)
+	}
 	fail := attempt.fail
 	if len(argv) == 0 {
 		return fail(errors.New("supply a command after --"))
@@ -541,6 +551,11 @@ func executeJobAttempt(home, self, start, backend string, includes, required []s
 		exit = *status.ExitStatus
 	}
 	attempt.phase = "patch"
+	saveReturn := func(state string) {
+		if err := recordEditReturn(home, job, state); err != nil {
+			logEvent(home, "edit-return", "record-failed", time.Time{})
+		}
+	}
 	if status.HasEdits {
 		var patch []byte
 		err := attempt.retry(resultCtx, "patch", func(ctx context.Context) error {
@@ -548,8 +563,9 @@ func executeJobAttempt(home, self, start, backend string, includes, required []s
 			_, patch, patchErr = provider.Call(ctx, []string{"patch", "--project", project, "--job", job}, false)
 			return patchErr
 		})
-		if err != nil || len(patch) > maxPatchSize {
+		if err != nil || len(patch) == 0 || len(patch) > maxPatchSize {
 			logEvent(home, "patch", "retrieve-failed", time.Time{})
+			saveReturn("failed")
 			if !attempt.automatic {
 				fmt.Fprintln(os.Stderr, "switchyard: could not retrieve worker edits; preserving command exit status")
 			}
@@ -558,19 +574,40 @@ func executeJobAttempt(home, self, start, backend string, includes, required []s
 		path := filepath.Join(home, "runs", job+".patch")
 		if err := writeAtomic(path, patch); err != nil {
 			logEvent(home, "patch", "save-failed", time.Time{})
+			saveReturn("failed")
 			if !attempt.automatic {
 				fmt.Fprintln(os.Stderr, "switchyard: could not save worker edits; preserving command exit status")
 			}
 			return exit
 		}
-		if !proxy {
-			fmt.Printf("Worker edits: %s (review before applying)\n", path)
-		} else {
-			logEvent(home, "patch", "saved", time.Time{})
+		state := "review"
+		if autoApply {
+			// Record the in-progress state before changing the caller's files.
+			// An interrupted publication must not look like a successful return.
+			err := recordEditReturn(home, job, "applying")
+			if err == nil {
+				err = returnWorkerEdits(home, chosen.Root, captured, patch)
+			}
+			state = "applied"
+			if err != nil {
+				state = "failed"
+				if errors.Is(err, errResultConflict) {
+					state = "conflict"
+				}
+				fmt.Fprintf(os.Stderr, "switchyard: edit return %s; review %s; preserving command exit status\n", state, path)
+			}
 		}
+		saveReturn(state)
+		logEvent(home, "edit-return", state, time.Time{})
+		if !proxy {
+			fmt.Printf("Worker edits: %s (%s)\n", path, state)
+		}
+	} else if status.EditsError == "" {
+		saveReturn("none")
 	}
 	if status.EditsError != "" {
 		logEvent(home, "patch", "collection-failed", time.Time{})
+		saveReturn("failed")
 	}
 	if provider.cfg.Kind != "local" {
 		executable, lookupErr := exec.LookPath(argv[0])
@@ -629,7 +666,11 @@ func existingJob(home, self, action, job string) int {
 	if state.EditsError != "" {
 		fmt.Println("Worker edits: collection failed")
 	} else if state.HasEdits {
-		fmt.Println("Worker edits: available")
+		result := record.EditReturn
+		if result == "" {
+			result = "available"
+		}
+		fmt.Printf("Worker edits: %s\n", result)
 	} else if state.State == "finished" {
 		fmt.Println("Worker edits: none")
 	}
@@ -681,7 +722,7 @@ func printHelp() {
 	fmt.Println("  switchyard preview [--repo PATH] [--include PATH]")
 	fmt.Println("  switchyard run [--backend auto|NAME] [--repo PATH] [--include PATH] [--require CAPABILITY] -- COMMAND ARGS...")
 	fmt.Println("  switchyard proxy [--backend auto|NAME] [--repo PATH] -- COMMAND ARGS...")
-	fmt.Println("  switchyard jobs                    list local run IDs and unapplied patches")
+	fmt.Println("  switchyard jobs                    list local run IDs, edit return status and patches")
 	fmt.Println("  switchyard stats [--limit N]       recent command timing samples by backend")
 	fmt.Println("  switchyard status|logs|cancel JOB_ID")
 	fmt.Println("  switchyard hook [--] TOOL ARGS...   (managed PATH shims)")
