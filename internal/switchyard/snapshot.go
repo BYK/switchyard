@@ -302,7 +302,13 @@ func captureFilesWithClone(start string, includes []string, home string, clone f
 			return capture{}, selection{}, err
 		}
 		hash := sha256.New()
-		cloned, copyErr := prepareClone(output, file, clone)
+		// Reflinking dirty small files can cost more than copying them because
+		// it flushes their extents first. Keep ordinary copy+hash below 1 MiB.
+		fileClone := clone
+		if before.Size() < 1<<20 {
+			fileClone = nil
+		}
+		cloned, copyErr := prepareClone(output, file, fileClone)
 		var written int64
 		if copyErr == nil {
 			if cloned {

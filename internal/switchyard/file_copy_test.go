@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -84,7 +85,7 @@ func TestCopyTreeKeepsIndependentWritableFiles(t *testing.T) {
 
 func TestCaptureCloneAndFallbackHaveIdenticalSnapshotIdentity(t *testing.T) {
 	root, home := fixture(t), t.TempDir()
-	artifactWrite(t, root, "binary", "\x00\xffbinary", 0o755)
+	artifactWrite(t, root, "binary", strings.Repeat("\x00\xffbinary", 1<<17), 0o755)
 	plain, _, err := captureFilesWithClone(root, nil, home, nil)
 	if err != nil {
 		t.Fatal(err)

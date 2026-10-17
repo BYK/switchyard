@@ -1,6 +1,6 @@
 # Filesystem copying and FUSE experiments
 
-Switchyard automatically attempts Linux `FICLONE` when freezing a selected source file and copying mirror, checkout, or result-staging files. Source and destination must be on a compatible filesystem. Unsupported filesystems, cross-device copies and restricted ioctl access fall back to the existing ordinary copy path. Linux amd64, arm64 and riscv64 use the ioctl; other targets use ordinary copying. I/O errors and exhausted storage fail the operation. A failed copy does not leave a partial destination file.
+Switchyard automatically attempts Linux `FICLONE` when freezing selected source files of at least 1 MiB and copying mirror, checkout, or result-staging files. Capture keeps ordinary copy+hash for smaller files: reflinking dirty small files required extent flushes and was slower in the initial Btrfs experiment. Source and destination must be on a compatible filesystem. Unsupported filesystems, cross-device copies and restricted ioctl access fall back to the existing ordinary copy path. Linux amd64, arm64 and riscv64 use the ioctl; other targets use ordinary copying. I/O errors and exhausted storage fail the operation. A failed copy does not leave a partial destination file.
 
 Clones have independent inodes, share unchanged extents, and isolate later writes in either direction. Capture hashes the frozen clone and retains the original source validation and size limits. Hashing and directory traversal still read the selected tree; reflinks do not make capture constant-time. Snapshot identity, network transfer and result-return behavior stay the same. The client source and `SWITCHYARD_HOME` must share a compatible filesystem for capture cloning; worker-local copies can benefit independently.
 
@@ -50,4 +50,4 @@ Set `TMPDIR` to a private directory on the filesystem being measured. Set `SWITC
 
 Remaining work in #9 includes phase-specific network/seed measurements, exclusive and peak storage accounting, Btrfs subvolume snapshots, realistic dependency installation, and remote transport/compression comparisons. This experiment does not establish cloud speedups or justify zstd transport compression.
 
-References: [Linux FICLONE contract](https://man7.org/linux/man-pages/man2/ioctl_ficlone.2.html), [fuse-overlayfs](https://github.com/containers/fuse-overlayfs).
+References: [Linux FICLONE contract](https://man7.org/linux/man-pages/man2/ioctl_ficlone.2.html), [fuse-overlayfs](https://github.com/containers/fuse-overlayfs), [process I/O accounting](https://man7.org/linux/man-pages/man5/proc_pid_io.5.html).

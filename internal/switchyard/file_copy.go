@@ -24,10 +24,17 @@ func prepareClone(output, input *os.File, clone fileCloner) (bool, error) {
 		!errors.Is(err, syscall.ENOSYS) && !errors.Is(err, syscall.EPERM) {
 		return false, err
 	}
-	// A fallback must start from a clean destination, including after a failed
-	// filesystem implementation or a future alternative cloning mechanism.
-	if err := output.Truncate(0); err != nil {
+	// Reset a partial attempt, but do not truncate an already-empty file. On
+	// ext4 even truncate(0) -> size 0 marks it for allocation on close, making
+	// the otherwise ordinary copy path much more expensive.
+	info, err := output.Stat()
+	if err != nil {
 		return false, err
+	}
+	if info.Size() != 0 {
+		if err := output.Truncate(0); err != nil {
+			return false, err
+		}
 	}
 	if _, err := output.Seek(0, io.SeekStart); err != nil {
 		return false, err
