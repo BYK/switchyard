@@ -102,6 +102,9 @@ func TestFUSECheckoutIsolation(t *testing.T) {
 		}
 	})
 	artifactWrite(t, view, "nested/edit", "changed", 0o755)
+	if err := os.Chmod(filepath.Join(view, "nested", "edit"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	artifactWrite(t, view, "new", "new output", 0o644)
 	if err := os.Remove(filepath.Join(view, "remove")); err != nil {
 		t.Fatal(err)
@@ -111,6 +114,9 @@ func TestFUSECheckoutIsolation(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(base, "new")); !os.IsNotExist(err) {
 		t.Fatal("FUSE creation escaped into base")
+	}
+	if info, err := os.Stat(filepath.Join(base, "nested", "edit")); err != nil || info.Mode().Perm() != 0o644 {
+		t.Fatal("FUSE chmod changed immutable base")
 	}
 	patch := filepath.Join(root, "changes.patch")
 	if reason := collectPatch(base, view, patch); reason != "" {
@@ -187,16 +193,24 @@ func filesystemCorpus(tb testing.TB, sample filesystemFixture) string {
 			tb.Fatal(err)
 		}
 	}
-	// Deterministic, non-sparse data. No source credentials or real repositories.
+	// Deterministic, non-sparse data. Binary files are incompressible; the other
+	// fixtures contain source-like text. Each file differs to avoid Git blob dedup.
+	// No source credentials or real repositories are used.
 	data := make([]byte, sample.size)
 	var value uint32 = 0x12345678
 	for i := range data {
-		value ^= value << 13
-		value ^= value >> 17
-		value ^= value << 5
-		data[i] = byte(value)
+		if sample.name == "binary" {
+			value ^= value << 13
+			value ^= value >> 17
+			value ^= value << 5
+			data[i] = byte(value)
+		} else {
+			const line = "const value = 'synthetic source fixture';\n"
+			data[i] = line[i%len(line)]
+		}
 	}
 	for i := 0; i < sample.count; i++ {
+		copy(data, fmt.Sprintf("// file %08d\n", i))
 		if err := os.WriteFile(filepath.Join(root, sample.path, fmt.Sprintf("file-%04d", i)), data, 0o644); err != nil {
 			tb.Fatal(err)
 		}
