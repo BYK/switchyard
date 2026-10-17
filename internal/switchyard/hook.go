@@ -182,7 +182,7 @@ func runHook(home, self string, args []string) int {
 		return 0
 	}
 	logEvent(home, "placement", "remote", time.Time{})
-	return executeJob(home, self, start, backend, nil, []string{"cpu"}, append([]string{tool}, command...), false, false)
+	return executeJob(home, self, start, backend, nil, []string{"cpu"}, append([]string{tool}, command...), false, true)
 }
 
 type placementCommand struct {

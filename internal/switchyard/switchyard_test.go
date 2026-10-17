@@ -854,11 +854,11 @@ func TestHookPreservesLocalCommandAndRoutesConfiguredBackend(t *testing.T) {
 	remote := exec.Command(shim, "test")
 	remote.Dir, remote.Env = root, append(os.Environ(), "SWITCHYARD_HOME="+home, "SWITCHYARD_BACKEND=fixture", "PATH="+path)
 	result, err := remote.CombinedOutput()
-	if err == nil || err.(*exec.ExitError).ExitCode() != 37 || !strings.Contains(string(result), "exit 37") {
+	if err == nil || err.(*exec.ExitError).ExitCode() != 37 || len(result) != 0 {
 		t.Fatalf("eligible command was not routed: %v %s", err, result)
 	}
-	if _, err := os.Stat(filepath.Join(root, "agent-note.txt")); !os.IsNotExist(err) {
-		t.Fatal("hook applied worker edits to source")
+	if content, err := os.ReadFile(filepath.Join(root, "agent-note.txt")); err != nil || string(content) != "worker edit\n" {
+		t.Fatal("hook did not return worker edits")
 	}
 	if script, err := exec.LookPath("script"); err == nil {
 		env := append(os.Environ(), "SWITCHYARD_HOME="+home, "SWITCHYARD_BACKEND=fixture", "PATH="+path, "SHELL=/usr/bin/bash")
@@ -869,11 +869,11 @@ func TestHookPreservesLocalCommandAndRoutesConfiguredBackend(t *testing.T) {
 		}
 		shellTTY := exec.Command(script, "-q", "-e", "-c", exe+" hook --shell --resolved "+tool+" -- pnpm test", "/dev/null")
 		shellTTY.Dir, shellTTY.Env = root, env
-		if result, err := shellTTY.CombinedOutput(); err == nil || err.(*exec.ExitError).ExitCode() != 37 || !strings.Contains(string(result), "exit 37") {
+		if result, err := shellTTY.CombinedOutput(); err == nil || err.(*exec.ExitError).ExitCode() != 37 || len(result) != 0 {
 			t.Fatalf("Bash hook did not route a TTY command: %v %q", err, result)
 		}
-		if _, err := os.Stat(filepath.Join(root, "agent-note.txt")); !os.IsNotExist(err) {
-			t.Fatal("Bash hook applied worker edits to source")
+		if content, err := os.ReadFile(filepath.Join(root, "agent-note.txt")); err != nil || string(content) != "worker edit\n" {
+			t.Fatal("Bash hook lost returned worker edits")
 		}
 	}
 	alternative := filepath.Join(toolDir, "alternate-pnpm")
