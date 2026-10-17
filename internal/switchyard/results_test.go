@@ -30,7 +30,7 @@ func resultFixture(t *testing.T, root, home string, edit func(string)) (capture,
 	}
 	edit(checkout)
 	path := filepath.Join(stage, "result.patch")
-	if reason := collectPatch(original, checkout, path); reason != "" {
+	if reason := collectPatch(original, checkout, path, captured.Manifest.Files); reason != "" {
 		t.Fatal(reason)
 	}
 	patch, err := os.ReadFile(path)

@@ -297,7 +297,7 @@ func TestArtifactCollectionIsIndependentOfSourcePatch(t *testing.T) {
 	artifactWrite(t, checkout, "README.md", "source edit\n", 0o644)
 	artifactWrite(t, checkout, "dist/new.bin", "output\x00", 0o644)
 	patch := filepath.Join(root, "changes.patch")
-	if reason := collectPatch(original, checkout, patch, "dist"); reason != "" {
+	if reason := collectPatch(original, checkout, patch, patchFixtureInputs(t, original), "dist"); reason != "" {
 		t.Fatal(reason)
 	}
 	content := resultRead(t, patch)
