@@ -46,7 +46,7 @@ func patchFixtureInputs(tb testing.TB, root string) []fileEntry {
 }
 
 func TestPatchMatchesFullTreeCollector(t *testing.T) {
-	for _, scenario := range []string{"unchanged", "edits", "ignored", "file-directory", "directory-file"} {
+	for _, scenario := range []string{"unchanged", "edits", "ignored", "new-file", "delete-all", "file-directory", "directory-file"} {
 		t.Run(scenario, func(t *testing.T) {
 			job := t.TempDir()
 			original, checkout := filepath.Join(job, "original"), filepath.Join(job, "checkout")
@@ -68,6 +68,15 @@ func TestPatchMatchesFullTreeCollector(t *testing.T) {
 			}
 			mutate := func(root string) {
 				switch scenario {
+				case "new-file":
+					artifactWrite(t, root, "new-source", "new file", 0o644)
+				case "delete-all":
+					if err := os.RemoveAll(root); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Mkdir(root, 0o700); err != nil {
+						t.Fatal(err)
+					}
 				case "edits":
 					for path, content := range map[string]string{
 						"text": "after!\r\n", "binary": "\x00\xfeafter!", "ignored/captured": "still tracked",
@@ -105,10 +114,12 @@ func TestPatchMatchesFullTreeCollector(t *testing.T) {
 				}
 			}
 			// Content changes with restored timestamps must still be detected.
-			stamp := time.Unix(1_700_000_000, 0)
-			for _, root := range []string{original, checkout} {
-				if err := os.Chtimes(filepath.Join(root, "text"), stamp, stamp); err != nil {
-					t.Fatal(err)
+			if scenario == "edits" {
+				stamp := time.Unix(1_700_000_000, 0)
+				for _, root := range []string{original, checkout} {
+					if err := os.Chtimes(filepath.Join(root, "text"), stamp, stamp); err != nil {
+						t.Fatal(err)
+					}
 				}
 			}
 			// Neither inherited configuration nor repository attributes may run a

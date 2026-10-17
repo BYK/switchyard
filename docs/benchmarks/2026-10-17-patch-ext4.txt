@@ -1,0 +1,123 @@
+# Workflow: https://github.com/BYK/switchyard/actions/runs/39067182231
+# Code: e0cd37c3539afd65732997af8aec9a456f84ba19
+# Storage: native ext4
+# Three one-iteration samples per case; paired old/new on the same runner.
+PASS
+ok  	github.com/BYK/switchyard/internal/switchyard	1.574s
+goos: linux
+goarch: amd64
+pkg: github.com/BYK/switchyard/internal/switchyard
+cpu: AMD EPYC 7763 64-Core Processor                
+BenchmarkSnapshotCapture/text/copy-2         	       1	  25703721 ns/op	   2121728 proc-write-B/op
+BenchmarkSnapshotCapture/text/copy-2         	       1	  23503845 ns/op	   2121728 proc-write-B/op
+BenchmarkSnapshotCapture/text/copy-2         	       1	  24067728 ns/op	   2121728 proc-write-B/op
+BenchmarkSnapshotCapture/text/auto-2         	       1	  26729639 ns/op	   2121728 proc-write-B/op
+BenchmarkSnapshotCapture/text/auto-2         	       1	  27248678 ns/op	   2121728 proc-write-B/op
+BenchmarkSnapshotCapture/text/auto-2         	       1	  24566928 ns/op	   2121728 proc-write-B/op
+BenchmarkSnapshotCapture/binary/copy-2       	       1	 126251910 ns/op	  67121152 proc-write-B/op
+BenchmarkSnapshotCapture/binary/copy-2       	       1	 125959107 ns/op	  67121152 proc-write-B/op
+BenchmarkSnapshotCapture/binary/copy-2       	       1	 125560573 ns/op	  67121152 proc-write-B/op
+BenchmarkSnapshotCapture/binary/auto-2       	       1	 126051323 ns/op	  67121152 proc-write-B/op
+BenchmarkSnapshotCapture/binary/auto-2       	       1	 125482766 ns/op	  67121152 proc-write-B/op
+BenchmarkSnapshotCapture/binary/auto-2       	       1	 125178398 ns/op	  67121152 proc-write-B/op
+BenchmarkSnapshotCapture/many-files/copy-2   	       1	 269495119 ns/op	   8654848 proc-write-B/op
+BenchmarkSnapshotCapture/many-files/copy-2   	       1	 267311629 ns/op	   8654848 proc-write-B/op
+BenchmarkSnapshotCapture/many-files/copy-2   	       1	 267505130 ns/op	   8654848 proc-write-B/op
+BenchmarkSnapshotCapture/many-files/auto-2   	       1	 265291925 ns/op	   8654848 proc-write-B/op
+BenchmarkSnapshotCapture/many-files/auto-2   	       1	 269563988 ns/op	   8654848 proc-write-B/op
+BenchmarkSnapshotCapture/many-files/auto-2   	       1	 270237885 ns/op	   8654848 proc-write-B/op
+BenchmarkSnapshotCapture/dependencies/copy-2 	       1	   7363651 ns/op	     12288 proc-write-B/op
+BenchmarkSnapshotCapture/dependencies/copy-2 	       1	   6451673 ns/op	     12288 proc-write-B/op
+BenchmarkSnapshotCapture/dependencies/copy-2 	       1	   7159218 ns/op	     12288 proc-write-B/op
+BenchmarkSnapshotCapture/dependencies/auto-2 	       1	   6441968 ns/op	     12288 proc-write-B/op
+BenchmarkSnapshotCapture/dependencies/auto-2 	       1	   7298542 ns/op	     12288 proc-write-B/op
+BenchmarkSnapshotCapture/dependencies/auto-2 	       1	   7123985 ns/op	     12288 proc-write-B/op
+BenchmarkCheckoutRoundTrip/text/copy-2       	       1	  33463425 ns/op	   3089326 cleanup-ns/op	    105948 command-ns/op	  22196918 export-ns/op	   8057698 prepare-ns/op	   2170880 proc-write-B/op
+BenchmarkCheckoutRoundTrip/text/copy-2       	       1	  31319609 ns/op	   2582105 cleanup-ns/op	     88826 command-ns/op	  20533583 export-ns/op	   8107482 prepare-ns/op	   2170880 proc-write-B/op
+BenchmarkCheckoutRoundTrip/text/copy-2       	       1	  31364521 ns/op	   2683264 cleanup-ns/op	    121758 command-ns/op	  20617637 export-ns/op	   7934027 prepare-ns/op	   2170880 proc-write-B/op
+BenchmarkCheckoutRoundTrip/text/auto-2       	       1	  31718433 ns/op	   2547932 cleanup-ns/op	     92473 command-ns/op	  20647094 export-ns/op	   8418442 prepare-ns/op	   2170880 proc-write-B/op
+BenchmarkCheckoutRoundTrip/text/auto-2       	       1	  31366969 ns/op	   2588227 cleanup-ns/op	     85259 command-ns/op	  20285912 export-ns/op	   8395298 prepare-ns/op	   2170880 proc-write-B/op
+BenchmarkCheckoutRoundTrip/text/auto-2       	       1	  34178831 ns/op	   2877528 cleanup-ns/op	     90740 command-ns/op	  22333263 export-ns/op	   8865831 prepare-ns/op	   2170880 proc-write-B/op
+BenchmarkCheckoutRoundTrip/text/auto-full-tree-2         	       1	  83620555 ns/op	   9705758 cleanup-ns/op	     93895 command-ns/op	  65557640 export-ns/op	   8253143 prepare-ns/op	   2736128 proc-write-B/op
+BenchmarkCheckoutRoundTrip/text/auto-full-tree-2         	       1	  80217966 ns/op	   8727971 cleanup-ns/op	     84748 command-ns/op	  63361788 export-ns/op	   8035125 prepare-ns/op	   2736128 proc-write-B/op
+BenchmarkCheckoutRoundTrip/text/auto-full-tree-2         	       1	  81402504 ns/op	  10226471 cleanup-ns/op	     82544 command-ns/op	  62992009 export-ns/op	   8090860 prepare-ns/op	   2736128 proc-write-B/op
+BenchmarkCheckoutRoundTrip/text/fuse-2                   	       1	  53140951 ns/op	   5216728 cleanup-ns/op	   2332429 command-ns/op	  34942281 export-ns/op	  10634964 prepare-ns/op	     73734 proc-write-B/op
+BenchmarkCheckoutRoundTrip/text/fuse-2                   	       1	  57798470 ns/op	   4378653 cleanup-ns/op	   2436523 command-ns/op	  40254957 export-ns/op	  10689767 prepare-ns/op	     73734 proc-write-B/op
+BenchmarkCheckoutRoundTrip/text/fuse-2                   	       1	  56497763 ns/op	   2725335 cleanup-ns/op	   2607312 command-ns/op	  40406259 export-ns/op	  10740621 prepare-ns/op	     73734 proc-write-B/op
+BenchmarkCheckoutRoundTrip/binary/copy-2                 	       1	  88588568 ns/op	   4306848 cleanup-ns/op	    126276 command-ns/op	  62493652 export-ns/op	  21645801 prepare-ns/op	  67182592 proc-write-B/op
+BenchmarkCheckoutRoundTrip/binary/copy-2                 	       1	  87443328 ns/op	   4250453 cleanup-ns/op	    117509 command-ns/op	  62573712 export-ns/op	  20486634 prepare-ns/op	  67182592 proc-write-B/op
+BenchmarkCheckoutRoundTrip/binary/copy-2                 	       1	  89501666 ns/op	   5081967 cleanup-ns/op	    125254 command-ns/op	  62397478 export-ns/op	  21877672 prepare-ns/op	  67182592 proc-write-B/op
+BenchmarkCheckoutRoundTrip/binary/auto-2                 	       1	  88165007 ns/op	   4386537 cleanup-ns/op	    177802 command-ns/op	  63609341 export-ns/op	  19954019 prepare-ns/op	  67182592 proc-write-B/op
+BenchmarkCheckoutRoundTrip/binary/auto-2                 	       1	  85846182 ns/op	   3782739 cleanup-ns/op	    105286 command-ns/op	  61768208 export-ns/op	  20176545 prepare-ns/op	  67182592 proc-write-B/op
+BenchmarkCheckoutRoundTrip/binary/auto-2                 	       1	  86682270 ns/op	   3841318 cleanup-ns/op	    131466 command-ns/op	  62210899 export-ns/op	  20481665 prepare-ns/op	  67182592 proc-write-B/op
+BenchmarkCheckoutRoundTrip/binary/auto-full-tree-2       	       1	2240778408 ns/op	  17819248 cleanup-ns/op	    113792 command-ns/op	2201596712 export-ns/op	  21232124 prepare-ns/op	 134332416 proc-write-B/op
+BenchmarkCheckoutRoundTrip/binary/auto-full-tree-2       	       1	2083078726 ns/op	  17591402 cleanup-ns/op	    123691 command-ns/op	2044863366 export-ns/op	  20482835 prepare-ns/op	 134332416 proc-write-B/op
+BenchmarkCheckoutRoundTrip/binary/auto-full-tree-2       	       1	2063449184 ns/op	  17487027 cleanup-ns/op	    117319 command-ns/op	2025012608 export-ns/op	  20817062 prepare-ns/op	 134332416 proc-write-B/op
+BenchmarkCheckoutRoundTrip/binary/fuse-2                 	       1	 107924710 ns/op	  10409722 cleanup-ns/op	    961898 command-ns/op	  85688319 export-ns/op	  10829847 prepare-ns/op	     73734 proc-write-B/op
+BenchmarkCheckoutRoundTrip/binary/fuse-2                 	       1	 106917235 ns/op	  10354498 cleanup-ns/op	    952029 command-ns/op	  84033464 export-ns/op	  11555884 prepare-ns/op	     73734 proc-write-B/op
+BenchmarkCheckoutRoundTrip/binary/fuse-2                 	       1	 104180203 ns/op	   8329344 cleanup-ns/op	    856069 command-ns/op	  84182775 export-ns/op	  10796184 prepare-ns/op	     73734 proc-write-B/op
+BenchmarkCheckoutRoundTrip/many-files/copy-2             	       1	 285275293 ns/op	  35914800 cleanup-ns/op	    111768 command-ns/op	 109855966 export-ns/op	 139375578 prepare-ns/op	   8462336 proc-write-B/op
+BenchmarkCheckoutRoundTrip/many-files/copy-2             	       1	 293885331 ns/op	  35745664 cleanup-ns/op	     93925 command-ns/op	 114753610 export-ns/op	 143279989 prepare-ns/op	   8462336 proc-write-B/op
+BenchmarkCheckoutRoundTrip/many-files/copy-2             	       1	 288230717 ns/op	  35649965 cleanup-ns/op	    113892 command-ns/op	 110828934 export-ns/op	 141625012 prepare-ns/op	   8462336 proc-write-B/op
+BenchmarkCheckoutRoundTrip/many-files/auto-2             	       1	 298474744 ns/op	  35035226 cleanup-ns/op	    157674 command-ns/op	 114789645 export-ns/op	 148474956 prepare-ns/op	   8462336 proc-write-B/op
+BenchmarkCheckoutRoundTrip/many-files/auto-2             	       1	 295872991 ns/op	  36732217 cleanup-ns/op	     93484 command-ns/op	 110953276 export-ns/op	 148079347 prepare-ns/op	   8462336 proc-write-B/op
+BenchmarkCheckoutRoundTrip/many-files/auto-2             	       1	 298671756 ns/op	  36317833 cleanup-ns/op	    105197 command-ns/op	 114216150 export-ns/op	 148020873 prepare-ns/op	   8462336 proc-write-B/op
+BenchmarkCheckoutRoundTrip/many-files/auto-full-tree-2   	       1	 682273359 ns/op	  82993243 cleanup-ns/op	     95499 command-ns/op	 453741374 export-ns/op	 145431702 prepare-ns/op	  17563648 proc-write-B/op
+BenchmarkCheckoutRoundTrip/many-files/auto-full-tree-2   	       1	 698539013 ns/op	  84083478 cleanup-ns/op	     91672 command-ns/op	 465818721 export-ns/op	 148533069 prepare-ns/op	  17563648 proc-write-B/op
+BenchmarkCheckoutRoundTrip/many-files/auto-full-tree-2   	       1	 693156164 ns/op	  82281780 cleanup-ns/op	     94537 command-ns/op	 458909716 export-ns/op	 151857777 prepare-ns/op	  17563648 proc-write-B/op
+BenchmarkCheckoutRoundTrip/many-files/fuse-2             	       1	 509534441 ns/op	   9632047 cleanup-ns/op	  28855636 command-ns/op	 460211894 export-ns/op	  10822280 prepare-ns/op	     73734 proc-write-B/op
+BenchmarkCheckoutRoundTrip/many-files/fuse-2             	       1	 499396815 ns/op	  10038253 cleanup-ns/op	  30242715 command-ns/op	 448251266 export-ns/op	  10848450 prepare-ns/op	     73734 proc-write-B/op
+BenchmarkCheckoutRoundTrip/many-files/fuse-2             	       1	 501736891 ns/op	   9948667 cleanup-ns/op	  29569183 command-ns/op	 451325316 export-ns/op	  10877623 prepare-ns/op	     73734 proc-write-B/op
+BenchmarkDispatchArtifacts/cold-2                        	       1	 200527850 ns/op
+BenchmarkDispatchArtifacts/cold-2                        	       1	 160710016 ns/op
+BenchmarkDispatchArtifacts/cold-2                        	       1	 160299077 ns/op
+BenchmarkDispatchArtifacts/warm-2                        	       1	 151535284 ns/op
+BenchmarkDispatchArtifacts/warm-2                        	       1	 152609020 ns/op
+BenchmarkDispatchArtifacts/warm-2                        	       1	 153114785 ns/op
+BenchmarkDispatchArtifacts/small-edit-2                  	       1	 172233766 ns/op
+BenchmarkDispatchArtifacts/small-edit-2                  	       1	 168537974 ns/op
+BenchmarkDispatchArtifacts/small-edit-2                  	       1	 148799194 ns/op
+BenchmarkPatchCollection/text/unchanged/full-tree-2      	       1	  65096704 ns/op	    618496 proc-write-B/op
+BenchmarkPatchCollection/text/unchanged/full-tree-2      	       1	  64260158 ns/op	    618496 proc-write-B/op
+BenchmarkPatchCollection/text/unchanged/full-tree-2      	       1	  65119019 ns/op	    618496 proc-write-B/op
+BenchmarkPatchCollection/text/unchanged/selective-2      	       1	   7190715 ns/op	         0 proc-write-B/op
+BenchmarkPatchCollection/text/unchanged/selective-2      	       1	   6873591 ns/op	         0 proc-write-B/op
+BenchmarkPatchCollection/text/unchanged/selective-2      	       1	   6811206 ns/op	         0 proc-write-B/op
+BenchmarkPatchCollection/text/small-edit/full-tree-2     	       1	  63457749 ns/op	    626688 proc-write-B/op
+BenchmarkPatchCollection/text/small-edit/full-tree-2     	       1	  67494028 ns/op	    626688 proc-write-B/op
+BenchmarkPatchCollection/text/small-edit/full-tree-2     	       1	  63517012 ns/op	    626688 proc-write-B/op
+BenchmarkPatchCollection/text/small-edit/selective-2     	       1	  21012099 ns/op	     61440 proc-write-B/op
+BenchmarkPatchCollection/text/small-edit/selective-2     	       1	  20622349 ns/op	     61440 proc-write-B/op
+BenchmarkPatchCollection/text/small-edit/selective-2     	       1	  20512753 ns/op	     61440 proc-write-B/op
+BenchmarkPatchCollection/binary/unchanged/full-tree-2    	       1	1990016818 ns/op	  67203072 proc-write-B/op
+BenchmarkPatchCollection/binary/unchanged/full-tree-2    	       1	2027899931 ns/op	  67203072 proc-write-B/op
+BenchmarkPatchCollection/binary/unchanged/full-tree-2    	       1	1987864367 ns/op	  67203072 proc-write-B/op
+BenchmarkPatchCollection/binary/unchanged/selective-2    	       1	  49252989 ns/op	         0 proc-write-B/op
+BenchmarkPatchCollection/binary/unchanged/selective-2    	       1	  48902048 ns/op	         0 proc-write-B/op
+BenchmarkPatchCollection/binary/unchanged/selective-2    	       1	  49184805 ns/op	         0 proc-write-B/op
+BenchmarkPatchCollection/binary/small-edit/full-tree-2   	       1	1992375719 ns/op	  67211264 proc-write-B/op
+BenchmarkPatchCollection/binary/small-edit/full-tree-2   	       1	1991641992 ns/op	  67211264 proc-write-B/op
+BenchmarkPatchCollection/binary/small-edit/full-tree-2   	       1	1992630582 ns/op	  67211264 proc-write-B/op
+BenchmarkPatchCollection/binary/small-edit/selective-2   	       1	  64776355 ns/op	     61440 proc-write-B/op
+BenchmarkPatchCollection/binary/small-edit/selective-2   	       1	  62212637 ns/op	     61440 proc-write-B/op
+BenchmarkPatchCollection/binary/small-edit/selective-2   	       1	  62131773 ns/op	     61440 proc-write-B/op
+BenchmarkPatchCollection/binary/binary-edit/full-tree-2  	       1	3229977575 ns/op	  83992576 proc-write-B/op
+BenchmarkPatchCollection/binary/binary-edit/full-tree-2  	       1	3224124400 ns/op	  83992576 proc-write-B/op
+BenchmarkPatchCollection/binary/binary-edit/full-tree-2  	       1	3288756337 ns/op	  83992576 proc-write-B/op
+BenchmarkPatchCollection/binary/binary-edit/selective-2  	       1	1825219201 ns/op	  67174400 proc-write-B/op
+BenchmarkPatchCollection/binary/binary-edit/selective-2  	       1	1823803997 ns/op	  67174400 proc-write-B/op
+BenchmarkPatchCollection/binary/binary-edit/selective-2  	       1	1873132838 ns/op	  67174400 proc-write-B/op
+BenchmarkPatchCollection/many-files/unchanged/full-tree-2         	       1	 464041870 ns/op	   9154560 proc-write-B/op
+BenchmarkPatchCollection/many-files/unchanged/full-tree-2         	       1	 432467196 ns/op	   9154560 proc-write-B/op
+BenchmarkPatchCollection/many-files/unchanged/full-tree-2         	       1	 432178774 ns/op	   9154560 proc-write-B/op
+BenchmarkPatchCollection/many-files/unchanged/selective-2         	       1	  96843863 ns/op	         0 proc-write-B/op
+BenchmarkPatchCollection/many-files/unchanged/selective-2         	       1	  96257907 ns/op	         0 proc-write-B/op
+BenchmarkPatchCollection/many-files/unchanged/selective-2         	       1	  96416104 ns/op	         0 proc-write-B/op
+BenchmarkPatchCollection/many-files/small-edit/full-tree-2        	       1	 416753526 ns/op	   9162752 proc-write-B/op
+BenchmarkPatchCollection/many-files/small-edit/full-tree-2        	       1	 434050328 ns/op	   9162752 proc-write-B/op
+BenchmarkPatchCollection/many-files/small-edit/full-tree-2        	       1	 420395748 ns/op	   9162752 proc-write-B/op
+BenchmarkPatchCollection/many-files/small-edit/selective-2        	       1	 112532827 ns/op	     61440 proc-write-B/op
+BenchmarkPatchCollection/many-files/small-edit/selective-2        	       1	 154786223 ns/op	     61440 proc-write-B/op
+BenchmarkPatchCollection/many-files/small-edit/selective-2        	       1	 112062826 ns/op	     61440 proc-write-B/op
+PASS
+ok  	github.com/BYK/switchyard/internal/switchyard	65.953s

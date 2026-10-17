@@ -71,6 +71,38 @@ The real local-provider dispatch benchmark (including automatic artifact return)
 
 These dispatch values establish a reproducible local baseline, not a before/after comparison or a remote-cloud latency claim. FUSE was only used in the checkout experiment. FUSE isolation and the 32-view lifecycle test passed on both runners; required reflink isolation passed on Btrfs.
 
+## Selective collection results — 2026-10-17
+
+[Workflow run 39067182231](https://github.com/BYK/switchyard/actions/runs/39067182231), code commit `e0cd37c3539afd65732997af8aec9a456f84ba19`. Go 1.22.12, Linux 6.17.0-1022-azure, fuse-overlayfs 1.13-dev. The native ext4 runner used an AMD EPYC 7763; the loopback Btrfs runner used an AMD EPYC 9V45. These are paired old/new medians of three samples within each runner, not comparisons with the earlier run above. [Raw ext4 samples](benchmarks/2026-10-17-patch-ext4.txt) and [raw Btrfs samples](benchmarks/2026-10-17-patch-btrfs.txt) include every observation.
+
+Complete checkout → README edit → patch collection → cleanup, using automatic checkout copying for both collectors:
+
+| Storage | Fixture | Full-tree collector (ms) | Selective collector (ms) | Speedup |
+| --- | --- | ---: | ---: | ---: |
+| ext4 | 2 MiB text | 81.4 | 31.7 | 2.6× |
+| ext4 | 64 MiB binary | 2083.1 | 86.7 | 24.0× |
+| ext4 | 2,048 files | 693.2 | 298.5 | 2.3× |
+| Btrfs | 2 MiB text | 69.1 | 29.3 | 2.4× |
+| Btrfs | 64 MiB binary | 1423.6 | 68.0 | 20.9× |
+| Btrfs | 2,048 files | 622.5 | 274.9 | 2.3× |
+
+Isolated collection on the 64 MiB binary tree:
+
+| Storage | Edit | Full-tree (ms) | Selective (ms) |
+| --- | --- | ---: | ---: |
+| ext4 | None | 1990.0 | 49.2 |
+| ext4 | Small README edit | 1992.4 | 62.2 |
+| ext4 | Edit one 16 MiB binary | 3230.0 | 1825.2 |
+| Btrfs | None | 1404.8 | 48.4 |
+| Btrfs | Small README edit | 1395.0 | 58.9 |
+| Btrfs | Edit one 16 MiB binary | 2265.2 | 1333.7 |
+
+Unchanged collection produced zero accounted writes on both runners. Small-edit collection fell from about 64 MiB to 60 KiB of accounted writes on ext4 and 68 KiB on Btrfs. The complete binary checkout loop fell from about 128 MiB to 64 MiB on ext4 and from about 64 MiB to 72 KiB on Btrfs. The changed binary case remains expensive because the collector must freeze and encode both versions of that file; its improvement was about 1.7–1.8×, rather than the much larger small-edit gain.
+
+With selective collection, FUSE complete-loop medians were 56.5 / 106.9 / 501.7 ms on ext4 and 40.5 / 78.7 / 291.1 ms on Btrfs for text / binary / many-files respectively. FUSE still did not beat automatic ordinary checkouts in these samples, so it remains experimental.
+
+The real local-provider artifact dispatch medians were 160.7 / 152.6 / 168.5 ms on ext4 and 199.6 / 159.2 / 156.1 ms on Btrfs for cold / warm / small-edit inputs. Btrfs cold samples varied from 191 to 806 ms. This dispatch benchmark exercises the optimized worker through the actual CLI but has no paired legacy-dispatch variant; it does not establish an end-to-end dispatch speedup. The paired checkout-loop benchmark also excludes client capture, transport, and client-side source-patch application. Full Go 1.22/stable race suites, patched Bash, actual FUSE mounts, and required Btrfs reflink checks passed.
+
 ## Reproduce
 
 On Linux with Go, Git and rsync:

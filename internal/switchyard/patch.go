@@ -211,16 +211,18 @@ func freezePatchFiles(source, dest string, entries []fileEntry) error {
 }
 
 func exportPatch(index, gitDir, checkout, dest, tree string) string {
+	file, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return "could not create worker patch"
+	}
 	cmd := exec.Command("git", "--git-dir="+gitDir, "--work-tree="+checkout,
 		"diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", "--no-renames", tree)
 	cmd.Dir, cmd.Env = checkout, patchEnvironment(index)
 	pipe, err := cmd.StdoutPipe()
 	if err != nil {
+		file.Close()
+		os.Remove(dest)
 		return "could not collect worker patch"
-	}
-	file, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return "could not create worker patch"
 	}
 	if err := cmd.Start(); err != nil {
 		file.Close()
