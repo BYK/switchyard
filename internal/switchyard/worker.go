@@ -734,17 +734,25 @@ func workerExecute(root, project, job, snapshot, cwd string, argv, environment [
 		logEvent(root, "job-log", "close-failed", time.Time{})
 	}
 	record.LogTruncated = output.truncated
+	if len(outputs) == 0 {
+		var err error
+		outputs, err = discoverArtifacts(checkout, m.Files)
+		if err != nil {
+			record.ArtifactError = "could not discover complete generated outputs"
+		}
+		record.Outputs = outputs
+	}
 	record.EditsError = collectPatch(incoming, checkout, filepath.Join(path, "changes.patch"), outputs...)
 	if record.EditsError == "" {
 		if info, err := os.Stat(filepath.Join(path, "changes.patch")); err == nil {
 			record.HasEdits = info.Size() > 0
 		}
 	}
-	if len(outputs) != 0 {
+	if len(outputs) != 0 && record.ArtifactError == "" {
 		var err error
 		record.ArtifactHash, record.ArtifactSize, err = collectArtifacts(checkout, filepath.Join(path, artifactFile), outputs)
 		if err != nil {
-			record.ArtifactError = "could not collect complete declared outputs"
+			record.ArtifactError = "could not collect complete generated outputs"
 		}
 	}
 	// A failed mirror update never changes the result of a completed command.
@@ -986,7 +994,7 @@ func runWorker(root, action, project, job, snapshot, cwd string, argv, environme
 		if err := workerReady(root); err != nil {
 			return 2, err
 		}
-		fmt.Println("1")
+		fmt.Println("2")
 		return 0, nil
 	case "load":
 		active, err := workerLoad(root)

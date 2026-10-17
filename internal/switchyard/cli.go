@@ -447,11 +447,14 @@ func executeJobAttempt(home, self, start, backend string, includes, required []s
 		return fail(err)
 	}
 	var artifactBaseline artifactManifest
+	var automaticArtifacts *automaticArtifactBaseline
 	if len(outputs) != 0 {
 		artifactBaseline, err = inspectArtifacts(chosen.Root, outputs, true)
 		if err != nil {
 			return fail(err)
 		}
+	} else {
+		automaticArtifacts = captureAutomaticArtifacts(chosen.Root, captured.Manifest.Files)
 	}
 	if !equalPaths(chosen.Paths, current.Paths) || !equalPaths(chosen.Excluded, current.Excluded) || chosen.Root != current.Root {
 		return fail(errors.New("file selection changed during capture"))
@@ -472,11 +475,9 @@ func executeJobAttempt(home, self, start, backend string, includes, required []s
 		setupCtx = bounded
 	}
 	attempt.phase = "prepare"
-	if len(outputs) != 0 {
-		_, version, err := provider.Call(setupCtx, []string{"artifact-support"}, false)
-		if err != nil || string(version) != "1\n" {
-			return fail(errors.New("worker does not support declared artifact return"))
-		}
+	_, version, err := provider.Call(setupCtx, []string{"artifact-support"}, false)
+	if err != nil || string(version) != "2\n" {
+		return fail(errors.New("worker does not support automatic artifact return"))
 	}
 	executeRequested := false
 	if attempt.automatic {
@@ -502,9 +503,7 @@ func executeJobAttempt(home, self, start, backend string, includes, required []s
 	}
 	attempt.phase = "job-record"
 	local := localJob{Project: project, Snapshot: captured.Snapshot, Backend: provider.Name(), Endpoint: endpointID(provider.cfg)}
-	if len(outputs) != 0 {
-		local.ArtifactReturn = "pending"
-	}
+	local.ArtifactReturn = "pending"
 	if err := saveLocalJob(home, job, local); err != nil {
 		return fail(err)
 	}
@@ -588,12 +587,14 @@ func executeJobAttempt(home, self, start, backend string, includes, required []s
 		logEvent(home, "status", "reconciled", time.Time{})
 		exit = *status.ExitStatus
 	}
-	receiveEdits(resultCtx, provider, home, job, chosen.Root, captured, status, attempt, autoApply, proxy, outputs)
-	if len(outputs) != 0 {
-		artifactCtx, cancelArtifacts := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancelArtifacts()
-		receiveArtifacts(artifactCtx, provider, home, job, chosen.Root, artifactBaseline, status, attempt, proxy)
+	patchOutputs := outputs
+	if automaticArtifacts != nil {
+		patchOutputs = status.Outputs
 	}
+	receiveEdits(resultCtx, provider, home, job, chosen.Root, captured, status, attempt, autoApply, proxy, patchOutputs)
+	artifactCtx, cancelArtifacts := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelArtifacts()
+	receiveArtifacts(artifactCtx, provider, home, job, chosen.Root, artifactBaseline, status, attempt, proxy, automaticArtifacts)
 	if provider.cfg.Kind != "local" {
 		executable, lookupErr := exec.LookPath(argv[0])
 		if filepath.Base(argv[0]) == argv[0] {
@@ -710,7 +711,7 @@ func printHelp() {
 	fmt.Println("  switchyard preview [--repo PATH] [--include PATH] [--output PATH]")
 	fmt.Println("  switchyard run [--backend auto|NAME] [--repo PATH] [--include PATH] [--output PATH] [--require CAPABILITY] -- COMMAND ARGS...")
 	fmt.Println("  switchyard proxy [--backend auto|NAME] [--repo PATH] [--output PATH] -- COMMAND ARGS...")
-	fmt.Println("  switchyard jobs                    list local run IDs, edit return status and patches")
+	fmt.Println("  switchyard jobs                    list local runs and source/artifact return status")
 	fmt.Println("  switchyard stats [--limit N]       recent command timing samples by backend")
 	fmt.Println("  switchyard status|logs|cancel JOB_ID")
 	fmt.Println("  switchyard hook [--] TOOL ARGS...   (managed PATH shims)")
@@ -814,7 +815,7 @@ func Main(args []string) int {
 		var required includesFlag
 		flags.Var(&required, "require", "required backend capability, repeatable")
 		var outputs includesFlag
-		flags.Var(&outputs, "output", "generated output file or directory relative to the worktree root, repeatable")
+		flags.Var(&outputs, "output", "override automatic output discovery with worktree-relative roots, repeatable")
 		if err := flags.Parse(args[1:]); err != nil {
 			return 2
 		}
@@ -833,6 +834,9 @@ func Main(args []string) int {
 			}
 			for _, path := range declared {
 				fmt.Printf("  output %s (complete replacement)\n", path)
+			}
+			if len(declared) == 0 {
+				fmt.Println("  outputs: discover generated ignored paths automatically")
 			}
 			return 0
 		}

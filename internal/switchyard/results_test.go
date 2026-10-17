@@ -367,6 +367,9 @@ if args[0] == 'execute':
     record = {'id':job, 'project':project, 'snapshot':manifest['snapshot'], 'state':'finished', 'exit_status':completed.returncode, 'has_edits':True}
     if archive:
         outputs = [args[i+1] for i, arg in enumerate(args[:args.index('--')]) if arg == '--output']
+        if not outputs:
+            with tarfile.open(archive) as bundle:
+                outputs = json.load(bundle.extractfile('manifest.json'))['outputs']
         record['outputs'] = outputs
         if mode == 'collect-fails':
             record['artifact_error'] = 'could not collect complete declared outputs'

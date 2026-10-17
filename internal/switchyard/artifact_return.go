@@ -105,10 +105,7 @@ func recordArtifactReturn(home, job, state string) error {
 	return writeAtomic(filepath.Join(home, "runs", job+".json"), append(content, '\n'))
 }
 
-func receiveArtifacts(ctx context.Context, provider shellProvider, home, job, root string, baseline artifactManifest, status jobRecord, attempt *jobAttempt, proxy bool) {
-	if len(baseline.Outputs) == 0 {
-		return
-	}
+func receiveArtifacts(ctx context.Context, provider shellProvider, home, job, root string, baseline artifactManifest, status jobRecord, attempt *jobAttempt, proxy bool, automatic *automaticArtifactBaseline) {
 	state := "failed"
 	path := filepath.Join(home, "runs", job+".artifacts.tar")
 	defer func() {
@@ -118,10 +115,21 @@ func receiveArtifacts(ctx context.Context, provider shellProvider, home, job, ro
 		logEvent(home, "artifact-return", state, time.Time{})
 		if state == "failed" || state == "conflict" {
 			fmt.Fprintf(os.Stderr, "switchyard: artifact return %s for job %s; inspect status and retained results; preserving command exit status\n", state, job)
-		} else if !proxy {
+		} else if !proxy && state != "none" {
 			fmt.Printf("Worker artifacts: %s (%s)\n", path, state)
 		}
 	}()
+	if automatic != nil {
+		outputs, err := normalizeOutputRoots(status.Outputs, maxArtifactEntries)
+		if err != nil || !equalPaths(outputs, status.Outputs) || validateOutputInputs(outputs, automatic.inputs) != nil {
+			return
+		}
+		baseline.Outputs = outputs
+		if len(outputs) == 0 && status.ArtifactError == "" && status.ArtifactHash == "" && status.ArtifactSize == 0 {
+			state = "none"
+			return
+		}
+	}
 	if status.ArtifactError != "" || !equalPaths(status.Outputs, baseline.Outputs) || requireSnapshot(status.ArtifactHash) != nil || status.ArtifactSize <= 0 || status.ArtifactSize > maxArtifactBundle {
 		return
 	}
@@ -147,13 +155,22 @@ func receiveArtifacts(ctx context.Context, provider shellProvider, home, job, ro
 	if err := writeAtomic(path, data); err != nil {
 		return
 	}
-	apply, err := applyResults(true) // Declaring outputs opts into their return, even for explicit run.
+	apply, err := applyResults(true) // Generated outputs return automatically, even for explicit run.
 	if err != nil {
 		return
 	}
 	if !apply {
 		state = "review"
 		return
+	}
+	if automatic != nil {
+		baseline, err = automatic.selectRoots(baseline.Outputs)
+		if err != nil {
+			if errors.Is(err, errArtifactConflict) {
+				state = "conflict"
+			}
+			return
+		}
 	}
 	if err := recordArtifactReturn(home, job, "applying"); err != nil {
 		return

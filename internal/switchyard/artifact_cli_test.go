@@ -19,8 +19,13 @@ func TestArtifactCLI(t *testing.T) {
 		{"proxy", "conflict", "conflict"}, {"proxy", "transport", "failed"}, {"proxy", "truncated", "failed"},
 		{"proxy", "tampered", "failed"}, {"proxy", "collect-fails", "failed"}, {"proxy", "patch-fails", "applied"},
 		{"proxy", "review", "review"}, {"run", "legacy", ""},
+		{"auto-proxy", "", "applied"}, {"auto-run", "", "applied"}, {"auto-hook", "", "applied"},
+		{"auto-proxy", "conflict", "conflict"}, {"auto-proxy", "transport", "failed"},
+		{"auto-proxy", "patch-fails", "applied"}, {"auto-proxy", "review", "review"}, {"auto-run", "legacy", ""},
 	} {
 		t.Run(sample.action+"/"+sample.mode, func(t *testing.T) {
+			action := strings.TrimPrefix(sample.action, "auto-")
+			automatic := action != sample.action
 			root, home := fixture(t), t.TempDir()
 			t.Setenv("SWITCHYARD_HOME", home)
 			t.Setenv("SWITCHYARD_RETURN_MODE", "")
@@ -53,12 +58,18 @@ func TestArtifactCLI(t *testing.T) {
 				script += `printf local > "$RESULT_SOURCE/dist/old.txt"; `
 			}
 			script += "exit 37"
-			args := []string{sample.action, "--backend", "sandbox", "--repo", root, "--output", "dist", "--output", "report.txt", "--", "sh", "-c", script}
+			args := []string{action, "--backend", "sandbox", "--repo", root}
+			if !automatic {
+				args = append(args, "--output", "dist", "--output", "report.txt")
+			}
+			args = append(args, "--", "sh", "-c", script)
 			if sample.mode == "review" {
 				t.Setenv("SWITCHYARD_RETURN_MODE", "patch")
 			}
-			if sample.action == "hook" {
-				t.Setenv("SWITCHYARD_OUTPUTS", `["dist","report.txt"]`)
+			if action == "hook" {
+				if !automatic {
+					t.Setenv("SWITCHYARD_OUTPUTS", `["dist","report.txt"]`)
+				}
 				t.Setenv("SWITCHYARD_TRACE_HANDOFF", "")
 				t.Setenv("SWITCHYARD_BACKEND", "sandbox")
 				args = []string{"hook", "--", "sh", "-c", script}
@@ -78,7 +89,7 @@ func TestArtifactCLI(t *testing.T) {
 			if status != 37 || !strings.Contains(stdout, "output\n") || string(resultRead(t, count)) != "x" {
 				t.Fatalf("command was lost or replayed: %d %q %q", status, stdout, stderr)
 			}
-			if sample.action != "run" && stdout != "output\n" {
+			if action != "run" && stdout != "output\n" {
 				t.Fatalf("command stdout changed: %q", stdout)
 			}
 			if sample.state == "failed" || sample.state == "conflict" {
@@ -109,7 +120,7 @@ func TestArtifactCLI(t *testing.T) {
 				}
 			}
 			expectedSource := "remote\n"
-			if sample.action == "run" || sample.mode == "review" || sample.mode == "patch-fails" {
+			if action == "run" || sample.mode == "review" || sample.mode == "patch-fails" {
 				expectedSource = "original\n"
 			}
 			if string(resultRead(t, filepath.Join(root, "README.md"))) != expectedSource {

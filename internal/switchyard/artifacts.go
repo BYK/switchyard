@@ -47,6 +47,13 @@ func normalizeOutputs(paths []string) ([]string, error) {
 	if len(paths) > 32 {
 		return nil, errors.New("at most 32 output paths may be declared")
 	}
+	return normalizeOutputRoots(paths, 32)
+}
+
+func normalizeOutputRoots(paths []string, limit int) ([]string, error) {
+	if len(paths) > limit {
+		return nil, errors.New("too many output roots")
+	}
 	result := make([]string, 0, len(paths))
 	for _, path := range paths {
 		path = strings.TrimSuffix(path, "/")
